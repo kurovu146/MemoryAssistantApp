@@ -230,6 +230,112 @@ export function deleteDocument(docId: number): boolean {
   return (result.rowsAffected ?? 0) > 0;
 }
 
+export function patchDocument(
+  docId: number,
+  oldText: string,
+  newText: string,
+): string {
+  const doc = getDocument(docId);
+  if (!doc) {
+    return `Document #${docId} not found.`;
+  }
+  if (!doc.content.includes(oldText)) {
+    return `Text not found in document #${docId}.`;
+  }
+  const updated = doc.content.replace(oldText, newText);
+  getDb().executeSync(
+    'UPDATE knowledge_documents SET content = ? WHERE id = ?',
+    [updated, docId],
+  );
+  return `Patched document #${docId}: replaced ${oldText.length} chars → ${newText.length} chars.`;
+}
+
+export function listDocuments(): {
+  id: number;
+  title: string;
+  source: string | null;
+  created_at: string;
+}[] {
+  const result = getDb().executeSync(
+    'SELECT id, title, source, created_at FROM knowledge_documents ORDER BY created_at DESC LIMIT 50',
+  );
+  return (result.rows ?? []).map((r: any) => ({
+    id: r.id,
+    title: r.title,
+    source: r.source ?? null,
+    created_at: r.created_at,
+  }));
+}
+
+// --- Entities ---
+
+export function saveEntity(name: string, entityType: string): number {
+  const d = getDb();
+  try {
+    const result = d.executeSync(
+      'INSERT INTO entities (name, entity_type) VALUES (?, ?) ON CONFLICT(name, entity_type) DO UPDATE SET name=name',
+      [name, entityType],
+    );
+    // ON CONFLICT DO UPDATE returns insertId=0 for existing rows; fall through to SELECT
+    if (result.insertId && result.insertId > 0) {
+      return result.insertId;
+    }
+    const existing = d.executeSync(
+      'SELECT id FROM entities WHERE name = ? AND entity_type = ?',
+      [name, entityType],
+    );
+    return (existing.rows?.[0] as any)?.id ?? 0;
+  } catch {
+    const existing = d.executeSync(
+      'SELECT id FROM entities WHERE name = ? AND entity_type = ?',
+      [name, entityType],
+    );
+    return (existing.rows?.[0] as any)?.id ?? 0;
+  }
+}
+
+export function addEntityMention(
+  entityId: number,
+  sourceType: string,
+  sourceId: number,
+  context?: string,
+): void {
+  try {
+    getDb().executeSync(
+      'INSERT INTO entity_mentions (entity_id, source_type, source_id, context) VALUES (?, ?, ?, ?)',
+      [entityId, sourceType, sourceId, context ?? null],
+    );
+  } catch {}
+}
+
+export function searchEntities(query: string): {
+  name: string;
+  entityType: string;
+  mentions: {sourceType: string; sourceId: number; context: string | null}[];
+}[] {
+  const d = getDb();
+  const result = d.executeSync(
+    `SELECT e.id, e.name, e.entity_type FROM entities e
+     WHERE e.name LIKE '%' || ? || '%' ORDER BY e.name LIMIT 20`,
+    [query],
+  );
+  return (result.rows ?? []).map((r: any) => {
+    const mentionResult = d.executeSync(
+      'SELECT source_type, source_id, context FROM entity_mentions WHERE entity_id = ? ORDER BY created_at DESC LIMIT 10',
+      [r.id],
+    );
+    return {
+      name: r.name as string,
+      entityType: r.entity_type as string,
+      mentions: (mentionResult.rows ?? []).map((m: any) => ({
+        sourceType: m.source_type as string,
+        sourceId: m.source_id as number,
+        context: m.context as string | null,
+      })),
+    };
+  });
+}
+
 // --- Memory Context ---
 
 export function buildMemoryContext(): string {
@@ -253,6 +359,95 @@ export function buildMemoryContext(): string {
   }
   ctx += '\n--- END MEMORY ---\n';
   return ctx;
+}
+
+// --- Knowledge Chunks ---
+
+export function saveChunks(
+  docId: number,
+  chunks: {
+    chunkIndex: number;
+    startLine: number;
+    endLine: number;
+    content: string;
+  }[],
+): number[] {
+  const d = getDb();
+  const ids: number[] = [];
+  for (const c of chunks) {
+    const result = d.executeSync(
+      'INSERT INTO knowledge_chunks (doc_id, chunk_index, start_line, end_line, content) VALUES (?, ?, ?, ?, ?)',
+      [docId, c.chunkIndex, c.startLine, c.endLine, c.content],
+    );
+    ids.push(result.insertId ?? 0);
+  }
+  return ids;
+}
+
+export function searchChunks(query: string): {
+  docId: number;
+  title: string;
+  content: string;
+  startLine: number;
+  endLine: number;
+  source: string | null;
+}[] {
+  const d = getDb();
+  const escaped = `"${query.replace(/"/g, '""')}"`;
+  try {
+    const result = d.executeSync(
+      `SELECT kc.doc_id, kd.title, kc.content, kc.start_line, kc.end_line, kd.source
+       FROM knowledge_chunks kc
+       JOIN knowledge_documents kd ON kc.doc_id = kd.id
+       JOIN knowledge_chunks_fts fts ON kc.id = fts.rowid
+       WHERE knowledge_chunks_fts MATCH ? ORDER BY rank LIMIT 10`,
+      [escaped],
+    );
+    return (result.rows ?? []).map((r: any) => ({
+      docId: r.doc_id ?? r['kc.doc_id'],
+      title: r.title ?? r['kd.title'],
+      content: r.content ?? r['kc.content'],
+      startLine: r.start_line ?? r['kc.start_line'],
+      endLine: r.end_line ?? r['kc.end_line'],
+      source: r.source ?? r['kd.source'] ?? null,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+// --- Memory-KB Links ---
+
+export function linkFactToDoc(factId: number, docId: number): void {
+  try {
+    getDb().executeSync(
+      'INSERT OR IGNORE INTO memory_kb_links (fact_id, doc_id) VALUES (?, ?)',
+      [factId, docId],
+    );
+  } catch {}
+}
+
+export function getFactLinks(factId: number): {docId: number; title: string}[] {
+  const result = getDb().executeSync(
+    `SELECT kd.id, kd.title FROM memory_kb_links mkl
+     JOIN knowledge_documents kd ON mkl.doc_id = kd.id
+     WHERE mkl.fact_id = ?`,
+    [factId],
+  );
+  return (result.rows ?? []).map((r: any) => ({
+    docId: r.id,
+    title: r.title,
+  }));
+}
+
+export function getDocLinkedFacts(docId: number): MemoryFact[] {
+  const result = getDb().executeSync(
+    `SELECT mf.id, mf.fact, mf.category FROM memory_kb_links mkl
+     JOIN memory_facts mf ON mkl.fact_id = mf.id
+     WHERE mkl.doc_id = ?`,
+    [docId],
+  );
+  return rowsToFacts(result.rows ?? []);
 }
 
 // --- Helpers ---

@@ -1,5 +1,17 @@
 import type {ToolDef} from '../providers/types';
 import * as repo from '../db/repository';
+import {chunkDocument} from '../utils/chunking';
+import {extractAndLinkEntities} from '../utils/entity-extractor';
+
+// Stored by configureTools so the sync executeTool can fire async extraction
+let _apiKey = '';
+let _model = '';
+
+/** Called by the agent loop before each run so entity extraction has credentials. */
+export function configureTools(apiKey: string, model: string): void {
+  _apiKey = apiKey;
+  _model = model;
+}
 
 export function getToolDefinitions(): ToolDef[] {
   return [
@@ -122,14 +134,44 @@ export function getToolDefinitions(): ToolDef[] {
       },
     },
     {
+      name: 'knowledge_patch',
+      description:
+        'Patch a knowledge document by replacing specific text. Use this instead of delete+save when updating existing docs.',
+      parameters: {
+        type: 'object',
+        properties: {
+          doc_id: {type: 'integer', description: 'Document ID to patch'},
+          old_text: {
+            type: 'string',
+            description: 'Text to find in the document',
+          },
+          new_text: {type: 'string', description: 'Replacement text'},
+        },
+        required: ['doc_id', 'old_text', 'new_text'],
+      },
+    },
+    {
       name: 'knowledge_delete',
-      description: 'Delete a knowledge document by ID.',
+      description:
+        'Delete a knowledge document and all its chunks by ID. Use knowledge_list to find the ID first.',
       parameters: {
         type: 'object',
         properties: {
           doc_id: {type: 'integer', description: 'Document ID to delete'},
         },
         required: ['doc_id'],
+      },
+    },
+    {
+      name: 'entity_search',
+      description:
+        'Search for entities (people, projects, technologies) in the knowledge graph. Shows which documents and facts mention them.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {type: 'string', description: 'Entity name to search for'},
+        },
+        required: ['query'],
       },
     },
     {
@@ -153,12 +195,25 @@ const TOOL_ICONS: Record<string, string> = {
   knowledge_search: '📚',
   knowledge_list: '📚',
   knowledge_get: '📚',
+  knowledge_patch: '📚',
   knowledge_delete: '📚',
+  entity_search: '🔗',
   get_datetime: '🕐',
 };
 
 export function getToolIcon(name: string): string {
   return TOOL_ICONS[name] ?? '🔧';
+}
+
+function formatFactWithLinks(f: repo.MemoryFact): string {
+  let line = `[#${f.id}] [${f.category}] ${f.fact}`;
+  try {
+    const links = repo.getFactLinks(f.id);
+    if (links.length > 0) {
+      line += ` → ${links.map(l => `#${l.docId} ${l.title}`).join(', ')}`;
+    }
+  } catch {}
+  return line;
 }
 
 export function executeTool(toolName: string, argsJson: string): string {
@@ -176,8 +231,50 @@ export function executeTool(toolName: string, argsJson: string): string {
       if (!fact) {
         return 'Error: fact cannot be empty';
       }
+
+      // Auto-supersede: find and delete existing facts in the same category that match
+      let deletedMsg = '';
+      try {
+        const oldFacts = repo.searchFacts(fact);
+        const deleted: string[] = [];
+        for (const old of oldFacts) {
+          if (old.category !== category) {
+            continue;
+          }
+          if (repo.deleteFact(old.id)) {
+            deleted.push(`#${old.id} ${old.fact}`);
+          }
+          if (deleted.length >= 3) {
+            break;
+          }
+        }
+        if (deleted.length > 0) {
+          deletedMsg = `\nSuperseded: ${deleted.join(', ')}`;
+        }
+      } catch {}
+
       const id = repo.saveFact(fact, category);
-      return `Saved memory #${id} [${category}]: ${fact}`;
+
+      // Auto-link to knowledge docs that contain relevant chunks
+      let linkedMsg = '';
+      try {
+        const chunks = repo.searchChunks(fact);
+        const docIds = new Set<number>();
+        for (const c of chunks) {
+          if (docIds.size >= 3) {
+            break;
+          }
+          if (!docIds.has(c.docId)) {
+            docIds.add(c.docId);
+            repo.linkFactToDoc(id, c.docId);
+          }
+        }
+        if (docIds.size > 0) {
+          linkedMsg = `\nLinked to ${docIds.size} document(s).`;
+        }
+      } catch {}
+
+      return `Saved memory #${id} [${category}]: ${fact}${deletedMsg}${linkedMsg}`;
     }
 
     case 'memory_search': {
@@ -189,9 +286,7 @@ export function executeTool(toolName: string, argsJson: string): string {
       if (results.length === 0) {
         return `No memories found for "${keyword}".`;
       }
-      return results
-        .map(f => `[#${f.id}] [${f.category}] ${f.fact}`)
-        .join('\n');
+      return results.map(formatFactWithLinks).join('\n');
     }
 
     case 'memory_list': {
@@ -202,9 +297,7 @@ export function executeTool(toolName: string, argsJson: string): string {
           ? `No memories in category "${cat}".`
           : 'No memories saved yet.';
       }
-      return results
-        .map(f => `[#${f.id}] [${f.category}] ${f.fact}`)
-        .join('\n');
+      return results.map(formatFactWithLinks).join('\n');
     }
 
     case 'memory_delete': {
@@ -259,7 +352,30 @@ export function executeTool(toolName: string, argsJson: string): string {
         args.source as string | undefined,
         args.tags as string | undefined,
       );
-      return `Saved document #${docId}: "${title}" (${content.length} chars)`;
+
+      const chunks = chunkDocument(content);
+      const chunkIds = repo.saveChunks(docId, chunks);
+
+      // Auto-link related memory facts by searching on the document title
+      let linkedMsg = '';
+      try {
+        const relatedFacts = repo.searchFacts(title);
+        for (const f of relatedFacts.slice(0, 5)) {
+          repo.linkFactToDoc(f.id, docId);
+        }
+        if (relatedFacts.length > 0) {
+          linkedMsg = `\nAuto-linked ${Math.min(relatedFacts.length, 5)} memory fact(s).`;
+        }
+      } catch {}
+
+      // Fire-and-forget entity extraction — non-blocking so tool returns immediately
+      if (_apiKey && _model) {
+        extractAndLinkEntities(_apiKey, _model, 'document', docId, title + ' ' + content).catch(
+          () => {},
+        );
+      }
+
+      return `Saved document #${docId}: "${title}" — ${chunkIds.length} chunks${linkedMsg}`;
     }
 
     case 'knowledge_search': {
@@ -267,28 +383,27 @@ export function executeTool(toolName: string, argsJson: string): string {
       if (!query) {
         return 'Error: query cannot be empty';
       }
-      const results = repo.searchDocuments(query);
-      if (results.length === 0) {
+      const chunks = repo.searchChunks(query);
+      if (chunks.length === 0) {
         return `No documents found for "${query}".`;
       }
-      return results
-        .map(d => `[#${d.id}] ${d.title}\n  ${d.snippet}`)
+      return chunks
+        .map(
+          c =>
+            `[doc #${c.docId}] ${c.title} (lines ${c.startLine}-${c.endLine})${c.source ? ` — ${c.source}` : ''}\n  ${c.content}`,
+        )
         .join('\n\n');
     }
 
     case 'knowledge_list': {
-      const d = repo.getDb();
-      const result = d.executeSync(
-        'SELECT id, title, source, created_at FROM knowledge_documents ORDER BY created_at DESC LIMIT 50',
-      );
-      const rows = result.rows ?? [];
-      if (rows.length === 0) {
+      const docs = repo.listDocuments();
+      if (docs.length === 0) {
         return 'No documents in knowledge base.';
       }
-      return rows
+      return docs
         .map(
-          (r: any) =>
-            `[#${r.id}] ${r.title}${r.source ? ` (${r.source})` : ''} — ${r.created_at}`,
+          d =>
+            `[#${d.id}] ${d.title}${d.source ? ` (${d.source})` : ''} — ${d.created_at}`,
         )
         .join('\n');
     }
@@ -302,7 +417,28 @@ export function executeTool(toolName: string, argsJson: string): string {
       if (!doc) {
         return `Document #${docId} not found.`;
       }
-      return `# ${doc.title}\nSource: ${doc.source ?? 'none'}\nTags: ${doc.tags ?? 'none'}\n\n${doc.content}`;
+      let out = `# ${doc.title}\nSource: ${doc.source ?? 'none'}\nTags: ${doc.tags ?? 'none'}\n\n${doc.content}`;
+      const linked = repo.getDocLinkedFacts(docId);
+      if (linked.length > 0) {
+        out += '\n\nLinked memories:';
+        for (const f of linked) {
+          out += `\n- [#${f.id}] ${f.fact}`;
+        }
+      }
+      return out;
+    }
+
+    case 'knowledge_patch': {
+      const docId = args.doc_id as number;
+      const oldText = (args.old_text as string) ?? '';
+      const newText = (args.new_text as string) ?? '';
+      if (!docId) {
+        return 'Error: doc_id is required';
+      }
+      if (!oldText) {
+        return 'Error: old_text cannot be empty';
+      }
+      return repo.patchDocument(docId, oldText, newText);
     }
 
     case 'knowledge_delete': {
@@ -311,8 +447,34 @@ export function executeTool(toolName: string, argsJson: string): string {
         return 'Error: doc_id is required';
       }
       return repo.deleteDocument(docId)
-        ? `Deleted document #${docId}.`
+        ? `Deleted document #${docId} and all its chunks.`
         : `Document #${docId} not found.`;
+    }
+
+    case 'entity_search': {
+      const query = (args.query as string) ?? '';
+      if (!query) {
+        return 'Error: query cannot be empty';
+      }
+      const entities = repo.searchEntities(query);
+      if (entities.length === 0) {
+        return `No entities found for "${query}".`;
+      }
+      return entities
+        .map(e => {
+          const header = `${e.name} (${e.entityType}) — ${e.mentions.length} mention(s)`;
+          if (e.mentions.length === 0) {
+            return header;
+          }
+          const mentionLines = e.mentions
+            .map(m => {
+              const ctx = m.context ? ` "…${m.context}…"` : '';
+              return `  • ${m.sourceType} #${m.sourceId}${ctx}`;
+            })
+            .join('\n');
+          return `${header}\n${mentionLines}`;
+        })
+        .join('\n\n');
     }
 
     case 'get_datetime': {

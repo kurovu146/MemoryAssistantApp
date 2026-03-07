@@ -1,11 +1,12 @@
 import {callClaude} from '../providers/claude';
+import {callOpenAI} from '../providers/openai';
 import type {
   Message,
   MessageContent,
   ToolCall,
   LlmResponse,
 } from '../providers/types';
-import {getToolDefinitions, executeTool} from './tools';
+import {getToolDefinitions, executeTool, configureTools} from './tools';
 
 export type AgentProgress =
   | {type: 'thinking'}
@@ -28,6 +29,7 @@ export async function runAgentLoop(
   maxTurns: number,
   onProgress: (progress: AgentProgress) => void,
 ): Promise<AgentResult> {
+  configureTools(apiKey, model);
   const tools = getToolDefinitions();
   const toolsUsed: string[] = [];
 
@@ -42,7 +44,10 @@ export async function runAgentLoop(
 
     let response: LlmResponse;
     try {
-      response = await callClaude(messages, tools, apiKey, model);
+      // Route to the appropriate provider based on model name prefix
+      response = model.startsWith('gpt-')
+        ? await callOpenAI(messages, tools, apiKey, model)
+        : await callClaude(messages, tools, apiKey, model);
     } catch (e: any) {
       const {deduped, counts} = dedupWithCounts(toolsUsed);
       return {
