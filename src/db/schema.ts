@@ -73,6 +73,8 @@ const DEFAULT_CATEGORIES = [
 export function initializeDatabase(db: DB) {
   db.executeSync('PRAGMA journal_mode=WAL');
   db.executeSync('PRAGMA busy_timeout=5000');
+  // IMPORTANT: foreign_keys=ON is required for ON DELETE CASCADE to work,
+  // which in turn fires AFTER DELETE triggers that keep FTS5 indexes in sync.
   db.executeSync('PRAGMA foreign_keys=ON');
   for (const stmt of SCHEMA_STATEMENTS) {
     db.executeSync(stmt);

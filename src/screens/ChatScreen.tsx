@@ -24,6 +24,7 @@ interface PendingImage {
   base64: string;
   mediaType: string;
   name: string;
+  fileId?: number;
 }
 
 function MessageBubble({msg}: {msg: ChatMessage}) {
@@ -180,9 +181,16 @@ export default function ChatScreen() {
         ? pendingImages.map(p => ({uri: p.uri, base64: p.base64, mediaType: p.mediaType}))
         : undefined;
 
+    // Append file source hints for images so knowledge_save can auto-link
+    const fileHints = pendingImages
+      .filter(p => p.fileId)
+      .map(p => `[source: file:${p.fileId}]`)
+      .join('\n');
+    const fullText = fileHints ? (text ? `${text}\n${fileHints}` : fileHints) : text;
+
     setInput('');
     setPendingImages([]);
-    sendMessage(text, activeApiKey, model, images);
+    sendMessage(fullText, activeApiKey, model, images);
   }, [input, canSend, activeApiKey, providerLabel, model, messages, sendMessage, pendingImages]);
 
   const handleFilePick = useCallback(async () => {
@@ -220,6 +228,7 @@ export default function ChatScreen() {
             base64,
             mediaType: mimeType,
             name: fileName,
+            fileId: saveResult.fileId,
           });
         } else {
           // Text file — send with file reference
