@@ -91,6 +91,18 @@ function buildClaudeMessages(messages: Message[]) {
       continue;
     }
 
+    if (msg.role === 'user' && c.type === 'multi_content') {
+      const blocks: Record<string, unknown>[] = c.images.map(img => ({
+        type: 'image',
+        source: {type: 'base64', media_type: img.mediaType, data: img.base64},
+      }));
+      if (c.text) {
+        blocks.push({type: 'text', text: c.text});
+      }
+      apiMessages.push({role: 'user', content: blocks});
+      continue;
+    }
+
     if (msg.role === 'assistant' && c.type === 'text') {
       apiMessages.push({role: 'assistant', content: c.text});
       continue;

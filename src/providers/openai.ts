@@ -77,6 +77,18 @@ function buildOpenAIMessages(messages: Message[]): {
       continue;
     }
 
+    if (msg.role === 'user' && c.type === 'multi_content') {
+      const parts: Record<string, unknown>[] = c.images.map(img => ({
+        type: 'image_url',
+        image_url: {url: `data:${img.mediaType};base64,${img.base64}`},
+      }));
+      if (c.text) {
+        parts.push({type: 'text', text: c.text});
+      }
+      apiMessages.push({role: 'user', content: parts});
+      continue;
+    }
+
     if (msg.role === 'assistant' && c.type === 'text') {
       apiMessages.push({role: 'assistant', content: c.text});
       continue;

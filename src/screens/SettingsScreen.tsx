@@ -1,70 +1,173 @@
 import React, {useState} from 'react';
 import {Alert, Pressable, ScrollView, Text, TextInput, View} from 'react-native';
 import {SafeAreaView} from 'react-native-safe-area-context';
-import {MODELS, useSettings} from '../stores/settings';
+import {
+  MODELS,
+  PROVIDERS,
+  useSettings,
+  getProviderForModel,
+  type ProviderName,
+} from '../stores/settings';
+
+const PROVIDER_ICONS: Record<ProviderName, string> = {
+  claude: 'C',
+  openai: 'O',
+  gemini: 'G',
+};
+
+function ProviderSection({provider}: {provider: (typeof PROVIDERS)[number]}) {
+  const {apiKeys, model, setApiKey, setModel} = useSettings();
+  const key = apiKeys[provider.name];
+  const [keyInput, setKeyInput] = useState(key);
+  const [showKey, setShowKey] = useState(false);
+  const [editing, setEditing] = useState(false);
+
+  const providerModels = MODELS.filter(m => m.provider === provider.name);
+
+  const masked = key
+    ? `${key.slice(0, Math.min(8, key.length))}...${key.slice(-4)}`
+    : '';
+
+  const handleSave = async () => {
+    await setApiKey(provider.name, keyInput.trim());
+    setEditing(false);
+    Alert.alert('Saved', `${provider.label} key saved to Keychain.`);
+  };
+
+  const handleClear = () => {
+    Alert.alert('Remove Key', `Remove ${provider.label} API key?`, [
+      {text: 'Cancel', style: 'cancel'},
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: async () => {
+          await setApiKey(provider.name, '');
+          setKeyInput('');
+          setEditing(false);
+        },
+      },
+    ]);
+  };
+
+  return (
+    <View>
+      {/* API Key */}
+      <View className="mb-4 rounded-xl bg-surface-light p-4">
+        <Text className="mb-2 text-xs font-semibold uppercase text-text-muted">
+          API Key
+        </Text>
+        {key && !editing ? (
+          <View>
+            <View className="flex-row items-center justify-between">
+              <Text className="text-sm text-success">Connected</Text>
+              <Pressable onPress={() => setShowKey(!showKey)}>
+                <Text className="text-xs text-accent">
+                  {showKey ? 'Hide' : 'Show'}
+                </Text>
+              </Pressable>
+            </View>
+            <Text className="mt-1 font-mono text-xs text-text-muted">
+              {showKey ? key : masked}
+            </Text>
+            <View className="mt-2 flex-row gap-2">
+              <Pressable
+                onPress={() => {
+                  setKeyInput(key);
+                  setEditing(true);
+                }}
+                className="rounded-lg bg-surface-lighter px-3 py-1.5">
+                <Text className="text-xs text-text-secondary">Edit</Text>
+              </Pressable>
+              <Pressable
+                onPress={handleClear}
+                className="rounded-lg bg-danger/20 px-3 py-1.5">
+                <Text className="text-xs text-danger">Remove</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : (
+          <View>
+            <TextInput
+              className="rounded-lg bg-surface px-3 py-2 font-mono text-sm text-text-primary"
+              placeholder={provider.placeholder}
+              placeholderTextColor="#6c7086"
+              value={keyInput}
+              onChangeText={setKeyInput}
+              autoCapitalize="none"
+              autoCorrect={false}
+              secureTextEntry={!showKey}
+            />
+            <View className="mt-2 flex-row gap-2">
+              <Pressable
+                onPress={handleSave}
+                disabled={!keyInput.trim()}
+                className={`flex-1 rounded-lg py-2 ${
+                  keyInput.trim() ? 'bg-primary' : 'bg-surface-lighter'
+                }`}>
+                <Text className="text-center text-sm font-semibold text-white">
+                  Save
+                </Text>
+              </Pressable>
+              {editing && (
+                <Pressable
+                  onPress={() => {
+                    setKeyInput(key);
+                    setEditing(false);
+                  }}
+                  className="rounded-lg bg-surface-lighter px-4 py-2">
+                  <Text className="text-sm text-text-secondary">Cancel</Text>
+                </Pressable>
+              )}
+            </View>
+            <Text className="mt-2 text-xs text-text-muted">
+              Stored in Keychain. Never leaves your device.
+            </Text>
+          </View>
+        )}
+      </View>
+
+      {/* Models */}
+      <View className="mb-4 rounded-xl bg-surface-light">
+        <Text className="px-4 pb-1 pt-3 text-xs font-semibold uppercase text-text-muted">
+          Model
+        </Text>
+        {providerModels.map((m, i) => {
+          const isSelected = model === m.id;
+          const hasKey = !!key;
+          return (
+            <Pressable
+              key={m.id}
+              onPress={() => hasKey && setModel(m.id)}
+              className={`flex-row items-center justify-between px-4 py-3 ${
+                i < providerModels.length - 1 ? 'border-b border-surface' : ''
+              } ${!hasKey ? 'opacity-40' : ''}`}>
+              <Text
+                className={`text-base ${
+                  isSelected ? 'font-semibold text-accent' : 'text-text-primary'
+                }`}>
+                {m.label}
+              </Text>
+              {isSelected && (
+                <View className="h-5 w-5 items-center justify-center rounded-full bg-primary">
+                  <Text className="text-xs text-white">✓</Text>
+                </View>
+              )}
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
 
 export default function SettingsScreen() {
-  const {
-    claudeApiKey,
-    openaiApiKey,
-    model,
-    botName,
-    setClaudeApiKey,
-    setOpenaiApiKey,
-    setModel,
-    setBotName,
-  } = useSettings();
-  const [keyInput, setKeyInput] = useState(claudeApiKey);
-  const [showKey, setShowKey] = useState(false);
-  const [openaiKeyInput, setOpenaiKeyInput] = useState(openaiApiKey);
-  const [showOpenaiKey, setShowOpenaiKey] = useState(false);
+  const {botName, setBotName, model, apiKeys} = useSettings();
   const [nameInput, setNameInput] = useState(botName);
+  const [activeTab, setActiveTab] = useState<ProviderName>(
+    getProviderForModel(model),
+  );
 
-  const handleSaveKey = async () => {
-    await setClaudeApiKey(keyInput.trim());
-    Alert.alert('Saved', 'API key saved securely to Keychain.');
-  };
-
-  const handleClearKey = async () => {
-    Alert.alert('Clear API Key', 'Remove your Claude API key?', [
-      {text: 'Cancel', style: 'cancel'},
-      {
-        text: 'Clear',
-        style: 'destructive',
-        onPress: async () => {
-          await setClaudeApiKey('');
-          setKeyInput('');
-        },
-      },
-    ]);
-  };
-
-  const handleSaveOpenaiKey = async () => {
-    await setOpenaiApiKey(openaiKeyInput.trim());
-    Alert.alert('Saved', 'OpenAI API key saved securely to Keychain.');
-  };
-
-  const handleClearOpenaiKey = async () => {
-    Alert.alert('Clear API Key', 'Remove your OpenAI API key?', [
-      {text: 'Cancel', style: 'cancel'},
-      {
-        text: 'Clear',
-        style: 'destructive',
-        onPress: async () => {
-          await setOpenaiApiKey('');
-          setOpenaiKeyInput('');
-        },
-      },
-    ]);
-  };
-
-  const maskedKey = claudeApiKey
-    ? `${claudeApiKey.slice(0, 10)}...${claudeApiKey.slice(-4)}`
-    : '';
-
-  const maskedOpenaiKey = openaiApiKey
-    ? `${openaiApiKey.slice(0, 7)}...${openaiApiKey.slice(-4)}`
-    : '';
+  const activeProvider = PROVIDERS.find(p => p.name === activeTab)!;
 
   return (
     <SafeAreaView className="flex-1 bg-surface" edges={['top']}>
@@ -73,208 +176,78 @@ export default function SettingsScreen() {
       </View>
 
       <ScrollView className="flex-1 px-4 pt-4">
-        {/* API Key */}
-        <View className="mb-6">
-          <Text className="mb-2 text-sm font-semibold uppercase text-text-muted">
-            Claude API Key
-          </Text>
-          <View className="rounded-xl bg-surface-light p-4">
-            {claudeApiKey ? (
-              <View>
-                <View className="flex-row items-center justify-between">
-                  <Text className="text-sm text-success">Connected</Text>
-                  <Pressable onPress={() => setShowKey(!showKey)}>
-                    <Text className="text-xs text-accent">
-                      {showKey ? 'Hide' : 'Show'}
-                    </Text>
-                  </Pressable>
-                </View>
-                <Text className="mt-1 font-mono text-xs text-text-muted">
-                  {showKey ? claudeApiKey : maskedKey}
-                </Text>
-                <View className="mt-3 flex-row gap-2">
-                  <Pressable
-                    onPress={() => {
-                      setKeyInput(claudeApiKey);
-                    }}
-                    className="rounded-lg bg-surface-lighter px-3 py-2">
-                    <Text className="text-sm text-text-secondary">Edit</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={handleClearKey}
-                    className="rounded-lg bg-danger/20 px-3 py-2">
-                    <Text className="text-sm text-danger">Remove</Text>
-                  </Pressable>
-                </View>
-              </View>
-            ) : (
-              <View>
-                <TextInput
-                  className="rounded-lg bg-surface px-3 py-2.5 font-mono text-sm text-text-primary"
-                  placeholder="sk-ant-..."
-                  placeholderTextColor="#6c7086"
-                  value={keyInput}
-                  onChangeText={setKeyInput}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  secureTextEntry={!showKey}
-                />
-                <Pressable
-                  onPress={handleSaveKey}
-                  disabled={!keyInput.trim()}
-                  className={`mt-3 rounded-lg py-2.5 ${
-                    keyInput.trim() ? 'bg-primary' : 'bg-surface-lighter'
-                  }`}>
-                  <Text className="text-center text-sm font-semibold text-white">
-                    Save Key
-                  </Text>
-                </Pressable>
-                <Text className="mt-2 text-xs text-text-muted">
-                  Stored securely in iOS Keychain / Android Keystore.
-                  Never leaves your device.
-                </Text>
-              </View>
-            )}
-          </View>
-        </View>
-
-        {/* OpenAI API Key */}
-        <View className="mb-6">
-          <Text className="mb-2 text-sm font-semibold uppercase text-text-muted">
-            OpenAI API Key
-          </Text>
-          <View className="rounded-xl bg-surface-light p-4">
-            {openaiApiKey ? (
-              <View>
-                <View className="flex-row items-center justify-between">
-                  <Text className="text-sm text-success">Connected</Text>
-                  <Pressable onPress={() => setShowOpenaiKey(!showOpenaiKey)}>
-                    <Text className="text-xs text-accent">
-                      {showOpenaiKey ? 'Hide' : 'Show'}
-                    </Text>
-                  </Pressable>
-                </View>
-                <Text className="mt-1 font-mono text-xs text-text-muted">
-                  {showOpenaiKey ? openaiApiKey : maskedOpenaiKey}
-                </Text>
-                <View className="mt-3 flex-row gap-2">
-                  <Pressable
-                    onPress={() => {
-                      setOpenaiKeyInput(openaiApiKey);
-                    }}
-                    className="rounded-lg bg-surface-lighter px-3 py-2">
-                    <Text className="text-sm text-text-secondary">Edit</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={handleClearOpenaiKey}
-                    className="rounded-lg bg-danger/20 px-3 py-2">
-                    <Text className="text-sm text-danger">Remove</Text>
-                  </Pressable>
-                </View>
-              </View>
-            ) : (
-              <View>
-                <TextInput
-                  className="rounded-lg bg-surface px-3 py-2.5 font-mono text-sm text-text-primary"
-                  placeholder="sk-..."
-                  placeholderTextColor="#6c7086"
-                  value={openaiKeyInput}
-                  onChangeText={setOpenaiKeyInput}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  secureTextEntry={!showOpenaiKey}
-                />
-                <Pressable
-                  onPress={handleSaveOpenaiKey}
-                  disabled={!openaiKeyInput.trim()}
-                  className={`mt-3 rounded-lg py-2.5 ${
-                    openaiKeyInput.trim() ? 'bg-primary' : 'bg-surface-lighter'
-                  }`}>
-                  <Text className="text-center text-sm font-semibold text-white">
-                    Save Key
-                  </Text>
-                </Pressable>
-                <Text className="mt-2 text-xs text-text-muted">
-                  Stored securely in iOS Keychain / Android Keystore.
-                  Never leaves your device.
-                </Text>
-              </View>
-            )}
-          </View>
-        </View>
-
         {/* Bot Name */}
-        <View className="mb-6">
-          <Text className="mb-2 text-sm font-semibold uppercase text-text-muted">
+        <View className="mb-4 rounded-xl bg-surface-light p-4">
+          <Text className="mb-2 text-xs font-semibold uppercase text-text-muted">
             Bot Name
           </Text>
-          <View className="rounded-xl bg-surface-light p-4">
-            <TextInput
-              className="rounded-lg bg-surface px-3 py-2.5 text-base text-text-primary"
-              placeholder="Assistant"
-              placeholderTextColor="#6c7086"
-              value={nameInput}
-              onChangeText={setNameInput}
-              onBlur={() => {
-                const name = nameInput.trim() || 'Assistant';
-                setNameInput(name);
-                setBotName(name);
-              }}
-              returnKeyType="done"
-              onSubmitEditing={() => {
-                const name = nameInput.trim() || 'Assistant';
-                setNameInput(name);
-                setBotName(name);
-              }}
-            />
-            <Text className="mt-2 text-xs text-text-muted">
-              The name your assistant uses to identify itself.
-            </Text>
-          </View>
+          <TextInput
+            className="rounded-lg bg-surface px-3 py-2.5 text-base text-text-primary"
+            placeholder="Assistant"
+            placeholderTextColor="#6c7086"
+            value={nameInput}
+            onChangeText={setNameInput}
+            onBlur={() => {
+              const name = nameInput.trim() || 'Assistant';
+              setNameInput(name);
+              setBotName(name);
+            }}
+            returnKeyType="done"
+            onSubmitEditing={() => {
+              const name = nameInput.trim() || 'Assistant';
+              setNameInput(name);
+              setBotName(name);
+            }}
+          />
         </View>
 
-        {/* Model Selection */}
-        <View className="mb-6">
-          <Text className="mb-2 text-sm font-semibold uppercase text-text-muted">
-            Model
-          </Text>
-          <View className="rounded-xl bg-surface-light">
-            {MODELS.map((m, i) => (
+        {/* Provider Tabs */}
+        <View className="mb-4 flex-row gap-2">
+          {PROVIDERS.map(p => {
+            const isActive = activeTab === p.name;
+            const hasKey = !!apiKeys[p.name];
+            return (
               <Pressable
-                key={m.id}
-                onPress={() => setModel(m.id)}
-                className={`flex-row items-center justify-between px-4 py-3.5 ${
-                  i < MODELS.length - 1 ? 'border-b border-surface' : ''
+                key={p.name}
+                onPress={() => setActiveTab(p.name)}
+                className={`flex-1 flex-row items-center justify-center gap-1.5 rounded-xl py-2.5 ${
+                  isActive ? 'bg-primary' : 'bg-surface-light'
                 }`}>
-                <Text className="text-base text-text-primary">{m.label}</Text>
-                {model === m.id && (
-                  <View className="h-5 w-5 items-center justify-center rounded-full bg-primary">
-                    <Text className="text-xs text-white">✓</Text>
-                  </View>
+                <Text
+                  className={`text-sm font-bold ${
+                    isActive ? 'text-white' : 'text-text-muted'
+                  }`}>
+                  {PROVIDER_ICONS[p.name]}
+                </Text>
+                <Text
+                  className={`text-sm font-medium ${
+                    isActive ? 'text-white' : 'text-text-secondary'
+                  }`}>
+                  {p.name.charAt(0).toUpperCase() + p.name.slice(1)}
+                </Text>
+                {hasKey && !isActive && (
+                  <View className="h-1.5 w-1.5 rounded-full bg-success" />
                 )}
               </Pressable>
-            ))}
-          </View>
+            );
+          })}
         </View>
 
+        {/* Active Provider Content */}
+        <ProviderSection provider={activeProvider} />
+
         {/* About */}
-        <View className="mb-6">
-          <Text className="mb-2 text-sm font-semibold uppercase text-text-muted">
-            About
+        <View className="mb-6 rounded-xl bg-surface-light p-4">
+          <Text className="text-base font-bold text-text-primary">
+            Memory Assistant
           </Text>
-          <View className="rounded-xl bg-surface-light p-4">
-            <Text className="text-base font-bold text-text-primary">
-              Memory Assistant
-            </Text>
-            <Text className="mt-1 text-sm text-text-secondary">
-              Version 0.0.1
-            </Text>
-            <Text className="mt-2 text-xs text-text-muted">
-              Privacy-first personal knowledge assistant.
-              All data stored locally on device.
-              API keys never leave your device.
-            </Text>
-          </View>
+          <Text className="mt-1 text-sm text-text-secondary">
+            Version 0.0.1
+          </Text>
+          <Text className="mt-2 text-xs text-text-muted">
+            Privacy-first personal knowledge assistant.{'\n'}
+            All data stored locally on device.
+          </Text>
         </View>
       </ScrollView>
     </SafeAreaView>

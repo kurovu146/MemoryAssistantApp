@@ -1,8 +1,14 @@
 export type Role = 'system' | 'user' | 'assistant' | 'tool';
 
+export interface ImageBlock {
+  base64: string;
+  mediaType: string;
+}
+
 export type MessageContent =
   | {type: 'text'; text: string}
   | {type: 'image'; text: string; imageBase64: string; mediaType: string}
+  | {type: 'multi_content'; text: string; images: ImageBlock[]}
   | {type: 'tool_result'; toolCallId: string; name: string; content: string}
   | {
       type: 'assistant_tool_calls';
@@ -49,6 +55,8 @@ export function getMessageText(content: MessageContent): string {
     case 'text':
       return content.text;
     case 'image':
+      return content.text;
+    case 'multi_content':
       return content.text;
     case 'tool_result':
       return content.content;

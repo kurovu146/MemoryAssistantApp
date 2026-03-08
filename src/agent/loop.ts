@@ -45,9 +45,16 @@ export async function runAgentLoop(
     let response: LlmResponse;
     try {
       // Route to the appropriate provider based on model name prefix
-      response = model.startsWith('gpt-')
-        ? await callOpenAI(messages, tools, apiKey, model)
-        : await callClaude(messages, tools, apiKey, model);
+      if (model.startsWith('gemini-')) {
+        response = await callOpenAI(
+          messages, tools, apiKey, model,
+          'https://generativelanguage.googleapis.com/v1beta/openai',
+        );
+      } else if (model.startsWith('gpt-')) {
+        response = await callOpenAI(messages, tools, apiKey, model);
+      } else {
+        response = await callClaude(messages, tools, apiKey, model);
+      }
     } catch (e: any) {
       const {deduped, counts} = dedupWithCounts(toolsUsed);
       return {

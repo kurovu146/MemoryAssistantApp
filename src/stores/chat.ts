@@ -1,14 +1,21 @@
 import {create} from 'zustand';
 import {runAgentLoop, type AgentProgress} from '../agent/loop';
-import type {Message} from '../providers/types';
+import type {Message, ImageBlock} from '../providers/types';
 import * as repo from '../db/repository';
-import {useSettings} from './settings';
+import {useSettings, getProviderForModel} from './settings';
 import {redactSecrets} from '../utils/content-filter';
+
+export interface ChatImage {
+  uri: string;
+  base64: string;
+  mediaType: string;
+}
 
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  images?: ChatImage[];
   toolsUsed?: string[];
   toolsCounts?: number[];
   turns?: number;
@@ -24,6 +31,7 @@ interface ChatState {
     text: string,
     apiKey: string,
     model: string,
+    images?: ChatImage[],
   ) => Promise<void>;
   newSession: () => void;
   loadSession: () => void;
@@ -31,8 +39,9 @@ interface ChatState {
 
 /** Resolves the correct API key for the given model from the settings store. */
 function resolveApiKey(model: string): string {
-  const settings = useSettings.getState();
-  return model.startsWith('gpt-') ? settings.openaiApiKey : settings.claudeApiKey;
+  const {apiKeys} = useSettings.getState();
+  const provider = getProviderForModel(model);
+  return apiKeys[provider] ?? '';
 }
 
 function buildSystemPrompt(botName: string): string {
@@ -123,20 +132,19 @@ export const useChat = create<ChatState>((set, get) => ({
     set({sessionId, messages: [], status: ''});
   },
 
-  sendMessage: async (text, _apiKey, model) => {
+  sendMessage: async (text, _apiKey, model, images) => {
     const {sessionId} = get();
     if (!sessionId) {
       return;
     }
 
-    // Always resolve the key from the settings store so callers don't need to
-    // thread it through — and so switching models mid-session works correctly.
     const apiKey = resolveApiKey(model);
 
     const userMsg: ChatMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
       content: text,
+      images,
       timestamp: Date.now(),
     };
 
@@ -170,10 +178,18 @@ export const useChat = create<ChatState>((set, get) => ({
       }
     };
 
+    const imageBlocks: ImageBlock[] | undefined = images?.map(img => ({
+      base64: img.base64,
+      mediaType: img.mediaType,
+    }));
+    const userContent = imageBlocks && imageBlocks.length > 0
+      ? {type: 'multi_content' as const, text, images: imageBlocks}
+      : {type: 'text' as const, text};
+
     try {
       const result = await runAgentLoop(
         fullPrompt,
-        {type: 'text', text},
+        userContent,
         apiKey,
         model,
         history,
