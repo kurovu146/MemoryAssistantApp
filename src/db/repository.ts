@@ -1,5 +1,6 @@
 import {open, type DB} from '@op-engineering/op-sqlite';
 import {initializeDatabase} from './schema';
+import {bufferToFloat32, cosineSimilarity} from '../utils/vector-search';
 
 let db: DB | null = null;
 
@@ -372,6 +373,145 @@ export function buildMemoryContext(): string {
 
 // --- Knowledge Chunks ---
 
+export function saveChunkEmbedding(chunkId: number, embedding: ArrayBuffer): void {
+  getDb().executeSync(
+    'UPDATE knowledge_chunks SET embedding = ? WHERE id = ?',
+    [new Uint8Array(embedding), chunkId],
+  );
+}
+
+export function getChunksWithEmbeddings(): {
+  id: number;
+  docId: number;
+  title: string;
+  content: string;
+  startLine: number;
+  endLine: number;
+  source: string | null;
+  embedding: ArrayBuffer;
+}[] {
+  const result = getDb().executeSync(
+    `SELECT kc.id, kc.doc_id, kd.title, kc.content, kc.start_line, kc.end_line, kd.source, kc.embedding
+     FROM knowledge_chunks kc
+     JOIN knowledge_documents kd ON kc.doc_id = kd.id
+     WHERE kc.embedding IS NOT NULL`,
+  );
+  return (result.rows ?? []).map((r: any) => ({
+    id: r.id ?? r['kc.id'],
+    docId: r.doc_id ?? r['kc.doc_id'],
+    title: r.title ?? r['kd.title'],
+    content: r.content ?? r['kc.content'],
+    startLine: r.start_line ?? r['kc.start_line'],
+    endLine: r.end_line ?? r['kc.end_line'],
+    source: r.source ?? r['kd.source'] ?? null,
+    embedding: r.embedding as ArrayBuffer,
+  }));
+}
+
+export function hybridSearch(
+  query: string,
+  queryEmbedding: Float32Array | null,
+  limit = 10,
+): {docId: number; title: string; content: string; startLine: number; endLine: number; source: string | null; score: number}[] {
+  const d = getDb();
+  const escaped = `"${query.replace(/"/g, '""')}"`;
+
+  // Step 1: FTS search
+  type FtsRow = {id: number; docId: number; title: string; content: string; startLine: number; endLine: number; source: string | null; rank: number};
+  const ftsRows: FtsRow[] = [];
+  try {
+    const ftsResult = d.executeSync(
+      `SELECT kc.id, kc.doc_id, kd.title, kc.content, kc.start_line, kc.end_line, kd.source, rank
+       FROM knowledge_chunks kc
+       JOIN knowledge_documents kd ON kc.doc_id = kd.id
+       JOIN knowledge_chunks_fts fts ON kc.id = fts.rowid
+       WHERE knowledge_chunks_fts MATCH ? ORDER BY rank LIMIT 50`,
+      [escaped],
+    );
+    for (const r of ftsResult.rows ?? []) {
+      const row = r as any;
+      ftsRows.push({
+        id: row.id ?? row['kc.id'],
+        docId: row.doc_id ?? row['kc.doc_id'],
+        title: row.title ?? row['kd.title'],
+        content: row.content ?? row['kc.content'],
+        startLine: row.start_line ?? row['kc.start_line'],
+        endLine: row.end_line ?? row['kc.end_line'],
+        source: row.source ?? row['kd.source'] ?? null,
+        rank: row.rank,
+      });
+    }
+  } catch {}
+
+  // Step 2: Vector search (only if embedding provided)
+  type VecRow = {id: number; docId: number; title: string; content: string; startLine: number; endLine: number; source: string | null; similarity: number};
+  const vecRows: VecRow[] = [];
+  if (queryEmbedding) {
+    const chunksWithEmb = getChunksWithEmbeddings();
+    for (const c of chunksWithEmb) {
+      const vec = bufferToFloat32(c.embedding);
+      const sim = cosineSimilarity(queryEmbedding, vec);
+      vecRows.push({
+        id: c.id,
+        docId: c.docId,
+        title: c.title,
+        content: c.content,
+        startLine: c.startLine,
+        endLine: c.endLine,
+        source: c.source,
+        similarity: sim,
+      });
+    }
+  }
+
+  // Step 3: Normalize scores to [0, 1]
+  const ftsScores = new Map<number, number>();
+  if (ftsRows.length > 0) {
+    // FTS rank is negative (lower = better in SQLite FTS5), invert and normalize
+    const ranks = ftsRows.map(r => r.rank);
+    const minRank = Math.min(...ranks);
+    const maxRank = Math.max(...ranks);
+    const range = maxRank - minRank;
+    for (const r of ftsRows) {
+      ftsScores.set(r.id, range === 0 ? 0.5 : (maxRank - r.rank) / range);
+    }
+  }
+
+  const vecScores = new Map<number, number>();
+  if (vecRows.length > 0) {
+    const sims = vecRows.map(r => r.similarity);
+    const minSim = Math.min(...sims);
+    const maxSim = Math.max(...sims);
+    const range = maxSim - minSim;
+    for (const r of vecRows) {
+      vecScores.set(r.id, range === 0 ? r.similarity : (r.similarity - minSim) / range);
+    }
+  }
+
+  // Step 4 & 5: Combine, deduplicate, sort
+  const combined = new Map<number, {docId: number; title: string; content: string; startLine: number; endLine: number; source: string | null; score: number}>();
+
+  for (const r of ftsRows) {
+    const fts = ftsScores.get(r.id) ?? 0;
+    const vec = vecScores.get(r.id) ?? 0;
+    const score = queryEmbedding ? 0.4 * fts + 0.6 * vec : fts;
+    combined.set(r.id, {docId: r.docId, title: r.title, content: r.content, startLine: r.startLine, endLine: r.endLine, source: r.source, score});
+  }
+
+  for (const r of vecRows) {
+    if (!combined.has(r.id)) {
+      const fts = ftsScores.get(r.id) ?? 0;
+      const vec = vecScores.get(r.id) ?? 0;
+      const score = 0.4 * fts + 0.6 * vec;
+      combined.set(r.id, {docId: r.docId, title: r.title, content: r.content, startLine: r.startLine, endLine: r.endLine, source: r.source, score});
+    }
+  }
+
+  return [...combined.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
 export function saveChunks(
   docId: number,
   chunks: {
@@ -502,6 +642,17 @@ export function listUploadedFiles(): UploadedFile[] {
     'SELECT id, filename, stored_path, mime_type, size_bytes, content_hash, doc_id, created_at FROM uploaded_files ORDER BY created_at DESC LIMIT 100',
   );
   return (result.rows ?? []).map((r: any) => rowToUploadedFile(r));
+}
+
+export function getUploadedFileById(fileId: number): UploadedFile | null {
+  const result = getDb().executeSync(
+    'SELECT id, filename, stored_path, mime_type, size_bytes, content_hash, doc_id, created_at FROM uploaded_files WHERE id = ?',
+    [fileId],
+  );
+  if (!result.rows || result.rows.length === 0) {
+    return null;
+  }
+  return rowToUploadedFile(result.rows[0] as any);
 }
 
 export function getUploadedFileInfo(fileId: number): {storedPath: string; docId: number | null} | null {

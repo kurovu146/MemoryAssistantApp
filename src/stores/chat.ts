@@ -4,6 +4,7 @@ import type {Message, ImageBlock} from '../providers/types';
 import * as repo from '../db/repository';
 import {useSettings, getProviderForModel} from './settings';
 import {redactSecrets} from '../utils/content-filter';
+import {embedQuery} from '../utils/voyage-client';
 
 export interface ChatImage {
   uri: string;
@@ -83,28 +84,59 @@ CÁCH DÙNG:
 - get_datetime: lấy ngày giờ hiện tại.`;
 }
 
-function buildAutoRag(userText: string): string {
+async function buildAutoRag(userText: string): Promise<string> {
+  // Run FTS knowledge, FTS memory, and optional vector embedding in parallel.
+  // Each branch is isolated so a failure in one never blocks the others.
+  const voyageApiKey = useSettings.getState().voyageApiKey;
+
+  const [ftsKnowledge, ftsMemory, queryEmbedding] = await Promise.all([
+    // Branch A: FTS document search (sync, wrapped for Promise.all)
+    Promise.resolve((() => {
+      try { return repo.searchDocuments(userText); } catch (e) { console.warn('[AutoRAG] FTS knowledge search failed:', e); return []; }
+    })()),
+    // Branch B: FTS memory search (sync, wrapped for Promise.all)
+    Promise.resolve((() => {
+      try { return repo.searchFacts(userText); } catch (e) { console.warn('[AutoRAG] FTS memory search failed:', e); return []; }
+    })()),
+    // Branch C: Voyage embedding — skipped if no key, graceful fallback on error
+    voyageApiKey
+      ? embedQuery(voyageApiKey, userText).catch((err: unknown) => {
+          console.warn('[AutoRAG] Voyage embedding failed, falling back to FTS:', err);
+          return null;
+        })
+      : Promise.resolve(null),
+  ]);
+
   let ragCtx = '';
 
+  // Knowledge section: prefer hybrid (chunk-level) when embedding succeeded,
+  // fall back to document-level FTS otherwise.
   try {
-    const knowledgeResults = repo.searchDocuments(userText);
-    if (knowledgeResults.length > 0) {
-      ragCtx += '\n\n--- AUTO-RAG: KNOWLEDGE BASE ---\n';
-      ragCtx += knowledgeResults
+    if (queryEmbedding) {
+      const hybridResults = repo.hybridSearch(userText, queryEmbedding, 10);
+      if (hybridResults.length > 0) {
+        ragCtx += '\n\n--- AUTO-RAG: KNOWLEDGE ---\n';
+        ragCtx += hybridResults
+          .map(c => `[#${c.docId}] ${c.title}\n  ${c.content}`)
+          .join('\n\n');
+      }
+    } else if (ftsKnowledge.length > 0) {
+      ragCtx += '\n\n--- AUTO-RAG: KNOWLEDGE ---\n';
+      ragCtx += ftsKnowledge
         .map(d => `[#${d.id}] ${d.title}\n  ${d.snippet}`)
         .join('\n\n');
     }
-  } catch {}
+  } catch (err) {
+    console.warn('[AutoRAG] Knowledge section failed:', err);
+  }
 
-  try {
-    const memoryResults = repo.searchFacts(userText);
-    if (memoryResults.length > 0) {
-      ragCtx += '\n\n--- AUTO-RAG: MEMORY ---\n';
-      ragCtx += memoryResults
-        .map(f => `[#${f.id}] [${f.category}] ${f.fact}`)
-        .join('\n');
-    }
-  } catch {}
+  // Memory section: always use FTS results from Branch B.
+  if (ftsMemory.length > 0) {
+    ragCtx += '\n\n--- AUTO-RAG: MEMORY ---\n';
+    ragCtx += ftsMemory
+      .map(f => `[#${f.id}] [${f.category}] ${f.fact}`)
+      .join('\n');
+  }
 
   return ragCtx;
 }
@@ -139,6 +171,7 @@ export const useChat = create<ChatState>((set, get) => ({
     }
 
     const apiKey = resolveApiKey(model);
+    const voyageApiKey = useSettings.getState().voyageApiKey;
 
     const userMsg: ChatMessage = {
       id: `user-${Date.now()}`,
@@ -158,7 +191,7 @@ export const useChat = create<ChatState>((set, get) => ({
 
     const memoryContext = repo.buildMemoryContext();
     const botName = useSettings.getState().botName;
-    const autoRag = buildAutoRag(text);
+    const autoRag = await buildAutoRag(text);
     const fullPrompt = buildSystemPrompt(botName) + memoryContext + autoRag;
 
     const historyMessages = repo.loadHistory(sessionId, 6);
@@ -195,6 +228,7 @@ export const useChat = create<ChatState>((set, get) => ({
         history,
         10,
         onProgress,
+        voyageApiKey || undefined,
       );
 
       const filteredResponse = redactSecrets(result.response);

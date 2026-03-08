@@ -130,10 +130,19 @@ function buildClaudeMessages(messages: Message[]) {
     }
 
     if (msg.role === 'tool' && c.type === 'tool_result') {
+      const resultContent: unknown = c.imageBase64
+        ? [
+            {
+              type: 'image',
+              source: {type: 'base64', media_type: c.imageMediaType, data: c.imageBase64},
+            },
+            {type: 'text', text: c.content},
+          ]
+        : c.content;
       const resultBlock = {
         type: 'tool_result',
         tool_use_id: c.toolCallId,
-        content: c.content,
+        content: resultContent,
       };
       const last = apiMessages[apiMessages.length - 1];
       if (

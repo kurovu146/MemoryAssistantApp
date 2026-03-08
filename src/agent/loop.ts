@@ -6,7 +6,7 @@ import type {
   ToolCall,
   LlmResponse,
 } from '../providers/types';
-import {getToolDefinitions, executeTool, configureTools} from './tools';
+import {getToolDefinitions, executeTool, configureTools, type ToolResult} from './tools';
 
 export type AgentProgress =
   | {type: 'thinking'}
@@ -28,8 +28,9 @@ export async function runAgentLoop(
   history: Message[],
   maxTurns: number,
   onProgress: (progress: AgentProgress) => void,
+  voyageApiKey?: string,
 ): Promise<AgentResult> {
-  configureTools(apiKey, model);
+  configureTools(apiKey, model, voyageApiKey);
   const tools = getToolDefinitions();
   const toolsUsed: string[] = [];
 
@@ -89,16 +90,11 @@ export async function runAgentLoop(
       toolsUsed.push(tc.name);
       onProgress({type: 'tool_use', name: tc.name});
 
-      const result = executeTool(tc.name, tc.arguments);
+      const result = await executeTool(tc.name, tc.arguments);
 
       messages.push({
         role: 'tool',
-        content: {
-          type: 'tool_result',
-          toolCallId: tc.id,
-          name: tc.name,
-          content: result,
-        },
+        content: buildToolResultContent(tc.id, tc.name, result, model),
       });
     }
   }
@@ -120,6 +116,29 @@ export async function runAgentLoop(
     toolsCounts: counts,
     turns: maxTurns,
   };
+}
+
+function buildToolResultContent(
+  toolCallId: string,
+  name: string,
+  result: ToolResult,
+  model: string,
+): import('../providers/types').MessageContent {
+  if (result.type === 'text') {
+    return {type: 'tool_result', toolCallId, name, content: result.content};
+  }
+  // Image result: Claude supports image blocks in tool results; OpenAI/Gemini get text fallback
+  if (model.startsWith('claude-')) {
+    return {
+      type: 'tool_result',
+      toolCallId,
+      name,
+      content: result.description,
+      imageBase64: result.base64,
+      imageMediaType: result.mediaType,
+    };
+  }
+  return {type: 'tool_result', toolCallId, name, content: result.description};
 }
 
 function dedupWithCounts(tools: string[]): {

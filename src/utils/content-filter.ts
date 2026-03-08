@@ -6,6 +6,7 @@ const SECRET_PATTERNS = [
   /gho_[a-zA-Z0-9]{36}/g, // GitHub OAuth tokens
   /xoxb-[a-zA-Z0-9-]+/g, // Slack bot tokens
   /Bearer\s+[a-zA-Z0-9._~+/=-]{20,}/g, // Bearer tokens
+  /pa-[a-zA-Z0-9_-]{20,}/g, // Voyage AI keys
 ];
 
 export function redactSecrets(text: string): string {

@@ -9,7 +9,14 @@ export type MessageContent =
   | {type: 'text'; text: string}
   | {type: 'image'; text: string; imageBase64: string; mediaType: string}
   | {type: 'multi_content'; text: string; images: ImageBlock[]}
-  | {type: 'tool_result'; toolCallId: string; name: string; content: string}
+  | {
+      type: 'tool_result';
+      toolCallId: string;
+      name: string;
+      content: string;
+      imageBase64?: string;
+      imageMediaType?: string;
+    }
   | {
       type: 'assistant_tool_calls';
       text?: string;

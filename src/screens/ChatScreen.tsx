@@ -17,7 +17,8 @@ import {pick, isCancel} from 'react-native-document-picker';
 import {useChat, type ChatMessage, type ChatImage} from '../stores/chat';
 import {useSettings, getProviderForModel, PROVIDERS} from '../stores/settings';
 import {getToolIcon} from '../agent/tools';
-import {saveUploadedFile, getAbsolutePath} from '../utils/file-manager';
+import {saveUploadedFile} from '../utils/file-manager';
+import {extractText} from '../utils/text-extractor';
 
 interface PendingImage {
   uri: string;
@@ -25,6 +26,13 @@ interface PendingImage {
   mediaType: string;
   name: string;
   fileId?: number;
+}
+
+interface PendingFile {
+  fileId: number;
+  filename: string;
+  extractedText: string;
+  mimeType: string;
 }
 
 function MessageBubble({msg}: {msg: ChatMessage}) {
@@ -138,6 +146,7 @@ export default function ChatScreen() {
   const {apiKeys, model} = useSettings();
   const [input, setInput] = useState('');
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const flatListRef = useRef<FlatList>(null);
 
   useEffect(() => {
@@ -154,7 +163,7 @@ export default function ChatScreen() {
   const activeApiKey = apiKeys[currentProvider];
   const providerLabel = PROVIDERS.find(p => p.name === currentProvider)?.label ?? currentProvider;
 
-  const canSend = !isLoading && (input.trim() || pendingImages.length > 0);
+  const canSend = !isLoading && (input.trim().length > 0 || pendingImages.length > 0 || pendingFiles.length > 0);
 
   const handleSend = useCallback(() => {
     const text = input.trim();
@@ -181,17 +190,32 @@ export default function ChatScreen() {
         ? pendingImages.map(p => ({uri: p.uri, base64: p.base64, mediaType: p.mediaType}))
         : undefined;
 
-    // Append file source hints for images so knowledge_save can auto-link
-    const fileHints = pendingImages
-      .filter(p => p.fileId)
-      .map(p => `[source: file:${p.fileId}]`)
-      .join('\n');
-    const fullText = fileHints ? (text ? `${text}\n${fileHints}` : fileHints) : text;
+    // Build combined text: extracted files + user input + source hints
+    const parts: string[] = [];
+
+    for (const f of pendingFiles) {
+      parts.push(`=== File: ${f.filename} ===\n${f.extractedText}`);
+    }
+
+    if (text) {
+      parts.push(text);
+    }
+
+    const fileSourceHints = [
+      ...pendingFiles.map(f => `[source: file:${f.fileId}]`),
+      ...pendingImages.filter(p => p.fileId).map(p => `[source: file:${p.fileId}]`),
+    ];
+    if (fileSourceHints.length > 0) {
+      parts.push(fileSourceHints.join('\n'));
+    }
+
+    const fullText = parts.join('\n\n');
 
     setInput('');
     setPendingImages([]);
+    setPendingFiles([]);
     sendMessage(fullText, activeApiKey, model, images);
-  }, [input, canSend, activeApiKey, providerLabel, model, messages, sendMessage, pendingImages]);
+  }, [input, canSend, activeApiKey, providerLabel, model, messages, sendMessage, pendingImages, pendingFiles]);
 
   const handleFilePick = useCallback(async () => {
     try {
@@ -201,6 +225,7 @@ export default function ChatScreen() {
       });
 
       const newImages: PendingImage[] = [];
+      const newFiles: PendingFile[] = [];
 
       for (const result of results) {
         const uri = result?.fileCopyUri ?? result?.uri;
@@ -231,34 +256,36 @@ export default function ChatScreen() {
             fileId: saveResult.fileId,
           });
         } else {
-          // Text file — send with file reference
-          if (!activeApiKey) {
-            Alert.alert('No API Key', `Please set your ${providerLabel} API key in Settings first.`);
+          // Extract text from file — buffer into pendingFiles
+          const MAX_TEXT_SIZE = 200 * 1024;
+          const extraction = await extractText(saveResult.absolutePath, mimeType);
+          if (!extraction.success) {
+            Alert.alert('Extraction Failed', `"${fileName}": ${extraction.error}`);
             continue;
           }
-          // Size limit: 200KB max for text files
-          const MAX_TEXT_SIZE = 200 * 1024;
-          if (saveResult.duplicate === false && saveResult.fileId) {
-            const response = await fetch(`file://${saveResult.absolutePath}`);
-            const text = await response.text();
-            if (text.length > MAX_TEXT_SIZE) {
-              Alert.alert('File Too Large', `"${fileName}" is too large (${(text.length / 1024).toFixed(0)}KB). Max 200KB for text files.`);
-              continue;
-            }
-            if (text.length > 0) {
-              sendMessage(
-                `[File: ${fileName}]\n[source: file:${saveResult.fileId}]\n\n${text}`,
-                activeApiKey,
-                model,
-              );
-            }
+          if (extraction.text.length > MAX_TEXT_SIZE) {
+            Alert.alert(
+              'File Too Large',
+              `"${fileName}" extracted text is too large (${(extraction.text.length / 1024).toFixed(0)}KB). Max 200KB.`,
+            );
+            continue;
           }
-          continue;
+          if (extraction.text.length > 0) {
+            newFiles.push({
+              fileId: saveResult.fileId,
+              filename: fileName,
+              extractedText: extraction.text,
+              mimeType,
+            });
+          }
         }
       }
 
       if (newImages.length > 0) {
         setPendingImages(prev => [...prev, ...newImages]);
+      }
+      if (newFiles.length > 0) {
+        setPendingFiles(prev => [...prev, ...newFiles]);
       }
     } catch (err: unknown) {
       if (!isCancel(err)) {
@@ -266,10 +293,14 @@ export default function ChatScreen() {
         Alert.alert('Error', `Failed to read file: ${message}`);
       }
     }
-  }, [activeApiKey, providerLabel, model, sendMessage]);
+  }, []);
 
   const removePendingImage = useCallback((index: number) => {
     setPendingImages(prev => prev.filter((_, i) => i !== index));
+  }, []);
+
+  const removePendingFile = useCallback((index: number) => {
+    setPendingFiles(prev => prev.filter((_, i) => i !== index));
   }, []);
 
   const renderItem = useCallback(
@@ -341,6 +372,28 @@ export default function ChatScreen() {
           </View>
         )}
 
+        {pendingFiles.length > 0 && (
+          <View className="border-t border-surface-light px-3 pt-2 pb-1">
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{gap: 6}}>
+              {pendingFiles.map((file, i) => (
+                <View
+                  key={i}
+                  className="flex-row items-center rounded-full bg-surface-lighter px-3 py-1">
+                  <Text className="mr-1.5 text-xs text-text-muted" numberOfLines={1}>
+                    📄 {file.filename}
+                  </Text>
+                  <Pressable onPress={() => removePendingFile(i)}>
+                    <Text className="text-xs font-bold text-text-muted">✕</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </ScrollView>
+          </View>
+        )}
+
         <View className="flex-row items-end border-t border-surface-light px-3 py-2">
           <Pressable
             onPress={handleFilePick}
@@ -350,7 +403,7 @@ export default function ChatScreen() {
           </Pressable>
           <TextInput
             className="mr-2 max-h-24 min-h-[40px] flex-1 rounded-xl bg-surface-light px-4 py-2.5 text-base text-text-primary"
-            placeholder={pendingImages.length > 0 ? 'Add a caption...' : 'Type a message...'}
+            placeholder={pendingImages.length > 0 || pendingFiles.length > 0 ? 'Add a caption...' : 'Type a message...'}
             placeholderTextColor="#6c7086"
             value={input}
             onChangeText={setInput}

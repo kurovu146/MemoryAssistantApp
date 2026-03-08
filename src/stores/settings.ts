@@ -33,13 +33,17 @@ const KEYCHAIN_SERVICES: Record<ProviderName, string> = {
   gemini: 'gemini-api-key',
 };
 
+const VOYAGE_KEYCHAIN_SERVICE = 'voyage-api-key';
+
 interface SettingsState {
   apiKeys: Record<ProviderName, string>;
+  voyageApiKey: string;
   model: string;
   botName: string;
   isLoaded: boolean;
   loadSettings: () => Promise<void>;
   setApiKey: (provider: ProviderName, key: string) => Promise<void>;
+  setVoyageApiKey: (key: string) => Promise<void>;
   setModel: (model: string) => void;
   setBotName: (name: string) => void;
   // Legacy getters for existing code
@@ -54,6 +58,7 @@ export function getProviderForModel(modelId: string): ProviderName {
 
 export const useSettings = create<SettingsState>((set, get) => ({
   apiKeys: {claude: '', openai: '', gemini: ''},
+  voyageApiKey: '',
   model: 'claude-haiku-4-5-20251001',
   botName: 'Assistant',
   isLoaded: false,
@@ -74,8 +79,17 @@ export const useSettings = create<SettingsState>((set, get) => ({
       } catch {}
     }
 
+    let voyageApiKey = '';
+    try {
+      const creds = await Keychain.getGenericPassword({service: VOYAGE_KEYCHAIN_SERVICE});
+      if (creds) {
+        voyageApiKey = creds.password;
+      }
+    } catch {}
+
     set({
       apiKeys,
+      voyageApiKey,
       model,
       botName,
       isLoaded: true,
@@ -99,6 +113,15 @@ export const useSettings = create<SettingsState>((set, get) => ({
         openaiApiKey: apiKeys.openai,
       };
     });
+  },
+
+  setVoyageApiKey: async (key: string) => {
+    if (key) {
+      await Keychain.setGenericPassword('voyage', key, {service: VOYAGE_KEYCHAIN_SERVICE});
+    } else {
+      await Keychain.resetGenericPassword({service: VOYAGE_KEYCHAIN_SERVICE});
+    }
+    set({voyageApiKey: key});
   },
 
   // Legacy methods kept for compatibility

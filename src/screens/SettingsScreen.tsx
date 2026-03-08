@@ -9,6 +9,7 @@ import {
   type ProviderName,
 } from '../stores/settings';
 
+
 const PROVIDER_ICONS: Record<ProviderName, string> = {
   claude: 'C',
   openai: 'O',
@@ -160,6 +161,117 @@ function ProviderSection({provider}: {provider: (typeof PROVIDERS)[number]}) {
   );
 }
 
+function EmbeddingsSection() {
+  const {voyageApiKey, setVoyageApiKey} = useSettings();
+  const [keyInput, setKeyInput] = useState(voyageApiKey);
+  const [showKey, setShowKey] = useState(false);
+  const [editing, setEditing] = useState(false);
+
+  const masked = voyageApiKey
+    ? `${voyageApiKey.slice(0, Math.min(8, voyageApiKey.length))}...${voyageApiKey.slice(-4)}`
+    : '';
+
+  const handleSave = async () => {
+    await setVoyageApiKey(keyInput.trim());
+    setEditing(false);
+    Alert.alert('Saved', 'Voyage AI key saved to Keychain.');
+  };
+
+  const handleClear = () => {
+    Alert.alert('Remove Key', 'Remove Voyage AI API key?', [
+      {text: 'Cancel', style: 'cancel'},
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: async () => {
+          await setVoyageApiKey('');
+          setKeyInput('');
+          setEditing(false);
+        },
+      },
+    ]);
+  };
+
+  return (
+    <View className="mb-4 rounded-xl bg-surface-light p-4">
+      <Text className="mb-0.5 text-sm font-semibold text-text-primary">
+        Voyage AI
+      </Text>
+      <Text className="mb-3 text-xs text-text-muted">
+        Optional — enables semantic search
+      </Text>
+      {voyageApiKey && !editing ? (
+        <View>
+          <View className="flex-row items-center justify-between">
+            <Text className="text-sm text-success">Connected</Text>
+            <Pressable onPress={() => setShowKey(!showKey)}>
+              <Text className="text-xs text-accent">
+                {showKey ? 'Hide' : 'Show'}
+              </Text>
+            </Pressable>
+          </View>
+          <Text className="mt-1 font-mono text-xs text-text-muted">
+            {showKey ? voyageApiKey : masked}
+          </Text>
+          <View className="mt-2 flex-row gap-2">
+            <Pressable
+              onPress={() => {
+                setKeyInput(voyageApiKey);
+                setEditing(true);
+              }}
+              className="rounded-lg bg-surface-lighter px-3 py-1.5">
+              <Text className="text-xs text-text-secondary">Edit</Text>
+            </Pressable>
+            <Pressable
+              onPress={handleClear}
+              className="rounded-lg bg-danger/20 px-3 py-1.5">
+              <Text className="text-xs text-danger">Remove</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : (
+        <View>
+          <TextInput
+            className="rounded-lg bg-surface px-3 py-2 font-mono text-sm text-text-primary"
+            placeholder="pa-..."
+            placeholderTextColor="#6c7086"
+            value={keyInput}
+            onChangeText={setKeyInput}
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry={!showKey}
+          />
+          <View className="mt-2 flex-row gap-2">
+            <Pressable
+              onPress={handleSave}
+              disabled={!keyInput.trim()}
+              className={`flex-1 rounded-lg py-2 ${
+                keyInput.trim() ? 'bg-primary' : 'bg-surface-lighter'
+              }`}>
+              <Text className="text-center text-sm font-semibold text-white">
+                Save
+              </Text>
+            </Pressable>
+            {editing && (
+              <Pressable
+                onPress={() => {
+                  setKeyInput(voyageApiKey);
+                  setEditing(false);
+                }}
+                className="rounded-lg bg-surface-lighter px-4 py-2">
+                <Text className="text-sm text-text-secondary">Cancel</Text>
+              </Pressable>
+            )}
+          </View>
+          <Text className="mt-2 text-xs text-text-muted">
+            Stored in Keychain. Never leaves your device.
+          </Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
 export default function SettingsScreen() {
   const {botName, setBotName, model, apiKeys} = useSettings();
   const [nameInput, setNameInput] = useState(botName);
@@ -235,6 +347,12 @@ export default function SettingsScreen() {
 
         {/* Active Provider Content */}
         <ProviderSection provider={activeProvider} />
+
+        {/* Embeddings */}
+        <Text className="mb-2 text-xs font-semibold uppercase text-text-muted">
+          Embeddings
+        </Text>
+        <EmbeddingsSection />
 
         {/* About */}
         <View className="mb-6 rounded-xl bg-surface-light p-4">
