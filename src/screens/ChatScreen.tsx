@@ -2,19 +2,29 @@ import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
   Alert,
   FlatList,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  ScrollView,
   Text,
   TextInput,
   View,
 } from 'react-native';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import Markdown from 'react-native-markdown-display';
-import {pick, types, isCancel} from 'react-native-document-picker';
-import {useChat, type ChatMessage} from '../stores/chat';
-import {useSettings} from '../stores/settings';
+import {pick, isCancel} from 'react-native-document-picker';
+import {useChat, type ChatMessage, type ChatImage} from '../stores/chat';
+import {useSettings, getProviderForModel, PROVIDERS} from '../stores/settings';
 import {getToolIcon} from '../agent/tools';
+import {saveUploadedFile, getAbsolutePath} from '../utils/file-manager';
+
+interface PendingImage {
+  uri: string;
+  base64: string;
+  mediaType: string;
+  name: string;
+}
 
 function MessageBubble({msg}: {msg: ChatMessage}) {
   const isUser = msg.role === 'user';
@@ -26,10 +36,25 @@ function MessageBubble({msg}: {msg: ChatMessage}) {
         className={`rounded-2xl px-4 py-3 ${
           isUser ? 'bg-primary rounded-br-sm' : 'bg-surface-light rounded-bl-sm'
         }`}>
+        {msg.images && msg.images.length > 0 && (
+          <View className="mb-2 flex-row flex-wrap gap-1.5">
+            {msg.images.map((img, i) => (
+              <Image
+                key={i}
+                source={{uri: img.uri}}
+                style={{width: msg.images!.length === 1 ? 220 : 120, height: msg.images!.length === 1 ? 220 : 120}}
+                className="rounded-xl"
+                resizeMode="cover"
+              />
+            ))}
+          </View>
+        )}
         {isUser ? (
-          <Text className="text-base text-white" selectable>
-            {msg.content}
-          </Text>
+          msg.content ? (
+            <Text className="text-base text-white" selectable>
+              {msg.content}
+            </Text>
+          ) : null
         ) : (
           <Markdown
             style={{
@@ -92,79 +117,151 @@ function MessageBubble({msg}: {msg: ChatMessage}) {
   );
 }
 
+async function readImageBase64(uri: string): Promise<string> {
+  const response = await fetch(uri);
+  const blob = await response.blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const dataUrl = reader.result as string;
+      resolve(dataUrl.split(',')[1] ?? '');
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
 export default function ChatScreen() {
-  const {messages, isLoading, status, sendMessage, loadSession, newSession} =
+  const {messages, isLoading, status, sendMessage, loadSession} =
     useChat();
-  const {claudeApiKey, openaiApiKey, model} = useSettings();
+  const {apiKeys, model} = useSettings();
   const [input, setInput] = useState('');
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const flatListRef = useRef<FlatList>(null);
 
   useEffect(() => {
     loadSession();
   }, []);
 
-  const isOpenAIModel = model.startsWith('gpt-');
-  const activeApiKey = isOpenAIModel ? openaiApiKey : claudeApiKey;
+  useEffect(() => {
+    if (messages.length > 0) {
+      setTimeout(() => flatListRef.current?.scrollToEnd({animated: true}), 100);
+    }
+  }, [messages.length]);
+
+  const currentProvider = getProviderForModel(model);
+  const activeApiKey = apiKeys[currentProvider];
+  const providerLabel = PROVIDERS.find(p => p.name === currentProvider)?.label ?? currentProvider;
+
+  const canSend = !isLoading && (input.trim() || pendingImages.length > 0);
 
   const handleSend = useCallback(() => {
     const text = input.trim();
-    if (!text || isLoading) {
+    if (!canSend) {
       return;
     }
     if (!activeApiKey) {
-      const provider = isOpenAIModel ? 'OpenAI' : 'Claude';
       useChat.setState({
         messages: [
           ...messages,
           {
             id: `err-${Date.now()}`,
             role: 'assistant',
-            content: `Please set your ${provider} API key in Settings first.`,
+            content: `Please set your ${providerLabel} API key in Settings first.`,
             timestamp: Date.now(),
           },
         ],
       });
       return;
     }
+
+    const images: ChatImage[] | undefined =
+      pendingImages.length > 0
+        ? pendingImages.map(p => ({uri: p.uri, base64: p.base64, mediaType: p.mediaType}))
+        : undefined;
+
     setInput('');
-    sendMessage(text, activeApiKey, model);
-  }, [input, isLoading, activeApiKey, isOpenAIModel, model, messages, sendMessage]);
+    setPendingImages([]);
+    sendMessage(text, activeApiKey, model, images);
+  }, [input, canSend, activeApiKey, providerLabel, model, messages, sendMessage, pendingImages]);
 
   const handleFilePick = useCallback(async () => {
     try {
       const results = await pick({
-        type: [types.plainText, types.csv, types.json],
-        allowMultiSelection: false,
+        allowMultiSelection: true,
+        copyTo: 'cachesDirectory',
       });
-      const result = results[0];
-      if (!result?.uri) {
-        return;
+
+      const newImages: PendingImage[] = [];
+
+      for (const result of results) {
+        const uri = result?.fileCopyUri ?? result?.uri;
+        if (!uri) {
+          continue;
+        }
+
+        const mimeType = result.type ?? '';
+        const fileName = result.name ?? 'untitled';
+
+        // Save file permanently + check duplicate
+        const saveResult = await saveUploadedFile(uri, fileName, mimeType);
+        if (saveResult.duplicate) {
+          Alert.alert(
+            'Duplicate File',
+            `"${fileName}" has the same content as "${saveResult.existingFile.filename}" (uploaded earlier). Skipped.`,
+          );
+          continue;
+        }
+
+        if (mimeType.startsWith('image/')) {
+          const base64 = await readImageBase64(saveResult.absolutePath);
+          newImages.push({
+            uri: saveResult.absolutePath,
+            base64,
+            mediaType: mimeType,
+            name: fileName,
+          });
+        } else {
+          // Text file — send with file reference
+          if (!activeApiKey) {
+            Alert.alert('No API Key', `Please set your ${providerLabel} API key in Settings first.`);
+            continue;
+          }
+          // Size limit: 200KB max for text files
+          const MAX_TEXT_SIZE = 200 * 1024;
+          if (saveResult.duplicate === false && saveResult.fileId) {
+            const response = await fetch(`file://${saveResult.absolutePath}`);
+            const text = await response.text();
+            if (text.length > MAX_TEXT_SIZE) {
+              Alert.alert('File Too Large', `"${fileName}" is too large (${(text.length / 1024).toFixed(0)}KB). Max 200KB for text files.`);
+              continue;
+            }
+            if (text.length > 0) {
+              sendMessage(
+                `[File: ${fileName}]\n[source: file:${saveResult.fileId}]\n\n${text}`,
+                activeApiKey,
+                model,
+              );
+            }
+          }
+          continue;
+        }
       }
 
-      const response = await fetch(result.uri);
-      const text = await response.text();
-
-      if (text.length === 0) {
-        Alert.alert('Empty File', 'The selected file appears to be empty.');
-        return;
+      if (newImages.length > 0) {
+        setPendingImages(prev => [...prev, ...newImages]);
       }
-
-      if (!activeApiKey) {
-        const provider = isOpenAIModel ? 'OpenAI' : 'Claude';
-        Alert.alert('No API Key', `Please set your ${provider} API key in Settings first.`);
-        return;
-      }
-
-      // Prepend filename context so the assistant knows what document is being shared
-      const fileMessage = `[File: ${result.name ?? 'untitled'}]\n\n${text}`;
-      sendMessage(fileMessage, activeApiKey, model);
     } catch (err: unknown) {
       if (!isCancel(err)) {
         const message = err instanceof Error ? err.message : 'Unknown error';
         Alert.alert('Error', `Failed to read file: ${message}`);
       }
     }
-  }, [activeApiKey, isOpenAIModel, model, sendMessage]);
+  }, [activeApiKey, providerLabel, model, sendMessage]);
+
+  const removePendingImage = useCallback((index: number) => {
+    setPendingImages(prev => prev.filter((_, i) => i !== index));
+  }, []);
 
   const renderItem = useCallback(
     ({item}: {item: ChatMessage}) => <MessageBubble msg={item} />,
@@ -173,15 +270,10 @@ export default function ChatScreen() {
 
   return (
     <SafeAreaView className="flex-1 bg-surface" edges={['top']}>
-      <View className="flex-row items-center justify-between border-b border-surface-light px-4 py-3">
+      <View className="border-b border-surface-light px-4 py-3">
         <Text className="text-lg font-bold text-text-primary">
           {useSettings.getState().botName}
         </Text>
-        <Pressable
-          onPress={newSession}
-          className="rounded-lg bg-surface-light px-3 py-1.5">
-          <Text className="text-sm text-accent">New Chat</Text>
-        </Pressable>
       </View>
 
       <KeyboardAvoidingView
@@ -216,6 +308,30 @@ export default function ChatScreen() {
           </View>
         ) : null}
 
+        {pendingImages.length > 0 && (
+          <View className="border-t border-surface-light px-3 pt-2">
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{gap: 8}}>
+              {pendingImages.map((img, i) => (
+                <View key={i} className="relative">
+                  <Image
+                    source={{uri: img.uri}}
+                    className="h-20 w-20 rounded-xl"
+                    resizeMode="cover"
+                  />
+                  <Pressable
+                    onPress={() => removePendingImage(i)}
+                    className="absolute -right-1 -top-1 h-5 w-5 items-center justify-center rounded-full bg-red-500">
+                    <Text className="text-xs font-bold text-white">✕</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </ScrollView>
+          </View>
+        )}
+
         <View className="flex-row items-end border-t border-surface-light px-3 py-2">
           <Pressable
             onPress={handleFilePick}
@@ -225,7 +341,7 @@ export default function ChatScreen() {
           </Pressable>
           <TextInput
             className="mr-2 max-h-24 min-h-[40px] flex-1 rounded-xl bg-surface-light px-4 py-2.5 text-base text-text-primary"
-            placeholder="Type a message..."
+            placeholder={pendingImages.length > 0 ? 'Add a caption...' : 'Type a message...'}
             placeholderTextColor="#6c7086"
             value={input}
             onChangeText={setInput}
@@ -236,9 +352,9 @@ export default function ChatScreen() {
           />
           <Pressable
             onPress={handleSend}
-            disabled={isLoading || !input.trim()}
+            disabled={!canSend}
             className={`h-10 w-10 items-center justify-center rounded-full ${
-              input.trim() && !isLoading ? 'bg-primary' : 'bg-surface-lighter'
+              canSend ? 'bg-primary' : 'bg-surface-lighter'
             }`}>
             <Text className="text-lg text-white">↑</Text>
           </Pressable>

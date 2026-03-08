@@ -223,11 +223,20 @@ export function getDocument(
 }
 
 export function deleteDocument(docId: number): boolean {
-  const result = getDb().executeSync(
-    'DELETE FROM knowledge_documents WHERE id = ?',
-    [docId],
-  );
-  return (result.rowsAffected ?? 0) > 0;
+  const d = getDb();
+  d.executeSync('BEGIN');
+  try {
+    cleanupDocumentEntities(docId);
+    const result = d.executeSync(
+      'DELETE FROM knowledge_documents WHERE id = ?',
+      [docId],
+    );
+    d.executeSync('COMMIT');
+    return (result.rowsAffected ?? 0) > 0;
+  } catch (e) {
+    d.executeSync('ROLLBACK');
+    throw e;
+  }
 }
 
 export function patchDocument(
@@ -448,6 +457,139 @@ export function getDocLinkedFacts(docId: number): MemoryFact[] {
     [docId],
   );
   return rowsToFacts(result.rows ?? []);
+}
+
+// --- Uploaded Files ---
+
+export interface UploadedFile {
+  id: number;
+  filename: string;
+  storedPath: string;
+  mimeType: string;
+  sizeBytes: number;
+  contentHash: string;
+  docId: number | null;
+  createdAt: string;
+}
+
+export function findFileByHash(hash: string): UploadedFile | null {
+  const result = getDb().executeSync(
+    'SELECT id, filename, stored_path, mime_type, size_bytes, content_hash, doc_id, created_at FROM uploaded_files WHERE content_hash = ?',
+    [hash],
+  );
+  if (!result.rows || result.rows.length === 0) {
+    return null;
+  }
+  return rowToUploadedFile(result.rows[0] as any);
+}
+
+export function saveUploadedFile(
+  filename: string,
+  storedPath: string,
+  mimeType: string,
+  sizeBytes: number,
+  contentHash: string,
+): number {
+  const result = getDb().executeSync(
+    'INSERT INTO uploaded_files (filename, stored_path, mime_type, size_bytes, content_hash) VALUES (?, ?, ?, ?, ?)',
+    [filename, storedPath, mimeType, sizeBytes, contentHash],
+  );
+  return result.insertId ?? 0;
+}
+
+export function listUploadedFiles(): UploadedFile[] {
+  const result = getDb().executeSync(
+    'SELECT id, filename, stored_path, mime_type, size_bytes, content_hash, doc_id, created_at FROM uploaded_files ORDER BY created_at DESC LIMIT 100',
+  );
+  return (result.rows ?? []).map((r: any) => rowToUploadedFile(r));
+}
+
+export function getUploadedFileInfo(fileId: number): {storedPath: string; docId: number | null} | null {
+  const result = getDb().executeSync(
+    'SELECT stored_path, doc_id FROM uploaded_files WHERE id = ?',
+    [fileId],
+  );
+  if (!result.rows || result.rows.length === 0) {
+    return null;
+  }
+  const row = result.rows[0] as any;
+  return {storedPath: row.stored_path as string, docId: row.doc_id as number | null};
+}
+
+export function linkFileToDocument(fileId: number, docId: number): void {
+  getDb().executeSync(
+    'UPDATE uploaded_files SET doc_id = ? WHERE id = ?',
+    [docId, fileId],
+  );
+}
+
+export function deleteUploadedFileRecord(fileId: number): {
+  storedPath: string;
+  docId: number | null;
+} | null {
+  const d = getDb();
+  const result = d.executeSync(
+    'SELECT stored_path, doc_id FROM uploaded_files WHERE id = ?',
+    [fileId],
+  );
+  if (!result.rows || result.rows.length === 0) {
+    return null;
+  }
+  const row = result.rows[0] as any;
+  const storedPath = row.stored_path as string;
+  const docId = row.doc_id as number | null;
+
+  d.executeSync('BEGIN');
+  try {
+    if (docId) {
+      cleanupDocumentEntities(docId);
+      d.executeSync('DELETE FROM knowledge_documents WHERE id = ?', [docId]);
+    }
+    d.executeSync('DELETE FROM uploaded_files WHERE id = ?', [fileId]);
+    d.executeSync('COMMIT');
+  } catch (e) {
+    d.executeSync('ROLLBACK');
+    throw e;
+  }
+  return {storedPath, docId};
+}
+
+/** Clean up entity_mentions + orphan entities for a document. Reused by deleteDocument. */
+function cleanupDocumentEntities(docId: number): void {
+  const d = getDb();
+  const mentions = d.executeSync(
+    "SELECT DISTINCT entity_id FROM entity_mentions WHERE source_type = 'document' AND source_id = ?",
+    [docId],
+  );
+  const entityIds = (mentions.rows ?? []).map((r: any) => r.entity_id as number);
+
+  d.executeSync(
+    "DELETE FROM entity_mentions WHERE source_type = 'document' AND source_id = ?",
+    [docId],
+  );
+
+  for (const eid of entityIds) {
+    const remaining = d.executeSync(
+      'SELECT COUNT(*) as cnt FROM entity_mentions WHERE entity_id = ?',
+      [eid],
+    );
+    if (((remaining.rows?.[0] as any)?.cnt ?? 0) === 0) {
+      d.executeSync('DELETE FROM entities WHERE id = ?', [eid]);
+    }
+  }
+}
+
+function rowToUploadedFile(r: any): UploadedFile {
+  return {
+    id: r.id,
+    filename: r.filename,
+    storedPath: r.stored_path,
+    mimeType: r.mime_type,
+    sizeBytes: r.size_bytes,
+    contentHash: r.content_hash,
+    docId: r.doc_id ?? null,
+    createdAt: r.created_at,
+  };
 }
 
 // --- Helpers ---

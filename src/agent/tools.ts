@@ -346,15 +346,28 @@ export function executeTool(toolName: string, argsJson: string): string {
       if (!title || !content) {
         return 'Error: title and content are required';
       }
+      const source = (args.source as string) ?? undefined;
       const docId = repo.saveDocument(
         title,
         content,
-        args.source as string | undefined,
+        source,
         args.tags as string | undefined,
       );
 
       const chunks = chunkDocument(content);
       const chunkIds = repo.saveChunks(docId, chunks);
+
+      // Auto-link uploaded file if source matches "file:{id}" pattern
+      let fileMsg = '';
+      if (source) {
+        const fileMatch = source.match(/^file:(\d+)$/);
+        if (fileMatch) {
+          try {
+            repo.linkFileToDocument(Number(fileMatch[1]), docId);
+            fileMsg = '\nLinked to uploaded file.';
+          } catch {}
+        }
+      }
 
       // Auto-link related memory facts by searching on the document title
       let linkedMsg = '';
@@ -375,7 +388,7 @@ export function executeTool(toolName: string, argsJson: string): string {
         );
       }
 
-      return `Saved document #${docId}: "${title}" — ${chunkIds.length} chunks${linkedMsg}`;
+      return `Saved document #${docId}: "${title}" — ${chunkIds.length} chunks${fileMsg}${linkedMsg}`;
     }
 
     case 'knowledge_search': {

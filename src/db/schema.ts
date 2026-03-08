@@ -40,6 +40,16 @@ const SCHEMA_STATEMENTS: string[] = [
     fact_id INTEGER NOT NULL REFERENCES memory_facts(id) ON DELETE CASCADE,
     doc_id INTEGER NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE(fact_id, doc_id))`,
+  `CREATE TABLE IF NOT EXISTS uploaded_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT NOT NULL,
+    stored_path TEXT NOT NULL UNIQUE,
+    mime_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    doc_id INTEGER REFERENCES knowledge_documents(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_files_hash ON uploaded_files(content_hash)`,
   `CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY, title TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

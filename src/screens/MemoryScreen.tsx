@@ -9,7 +9,10 @@ import {
 } from 'react-native';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import * as repo from '../db/repository';
-import type {MemoryFact} from '../db/repository';
+import type {MemoryFact, UploadedFile} from '../db/repository';
+import SegmentTabs from '../components/SegmentTabs';
+import FileList from '../components/FileList';
+import {deleteUploadedFile} from '../utils/file-manager';
 
 function FactItem({
   fact,
@@ -46,13 +49,17 @@ function FactItem({
   );
 }
 
+const TABS = ['Memory', 'Files'];
+
 export default function MemoryScreen() {
+  const [activeTab, setActiveTab] = useState('Memory');
   const [facts, setFacts] = useState<MemoryFact[]>([]);
   const [search, setSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [categories, setCategories] = useState<string[]>([]);
+  const [files, setFiles] = useState<UploadedFile[]>([]);
 
-  const loadData = useCallback(() => {
+  const loadMemoryData = useCallback(() => {
     setCategories(repo.listCategories());
     if (search.trim()) {
       setFacts(repo.searchFacts(search.trim()));
@@ -61,23 +68,39 @@ export default function MemoryScreen() {
     }
   }, [search, selectedCategory]);
 
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+  const loadFiles = useCallback(() => {
+    setFiles(repo.listUploadedFiles());
+  }, []);
 
-  const handleDelete = useCallback(
+  useEffect(() => {
+    if (activeTab === 'Memory') {
+      loadMemoryData();
+    } else {
+      loadFiles();
+    }
+  }, [activeTab, loadMemoryData, loadFiles]);
+
+  const handleDeleteFact = useCallback(
     (id: number) => {
       repo.deleteFact(id);
-      loadData();
+      loadMemoryData();
     },
-    [loadData],
+    [loadMemoryData],
+  );
+
+  const handleDeleteFile = useCallback(
+    async (file: UploadedFile) => {
+      await deleteUploadedFile(file.id);
+      loadFiles();
+    },
+    [loadFiles],
   );
 
   const renderFact = useCallback(
     ({item}: {item: MemoryFact}) => (
-      <FactItem fact={item} onDelete={handleDelete} />
+      <FactItem fact={item} onDelete={handleDeleteFact} />
     ),
-    [handleDelete],
+    [handleDeleteFact],
   );
 
   return (
@@ -86,64 +109,72 @@ export default function MemoryScreen() {
         <Text className="text-lg font-bold text-text-primary">Memory</Text>
       </View>
 
-      <View className="px-3 pt-3">
-        <TextInput
-          className="rounded-xl bg-surface-light px-4 py-2.5 text-base text-text-primary"
-          placeholder="Search memories..."
-          placeholderTextColor="#6c7086"
-          value={search}
-          onChangeText={setSearch}
-        />
-      </View>
+      <SegmentTabs tabs={TABS} activeTab={activeTab} onTabChange={setActiveTab} />
 
-      {!search && (
-        <View className="px-3 pt-3">
-          <FlatList
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            data={['all', ...categories]}
-            keyExtractor={item => item}
-            renderItem={({item}) => {
-              const isSelected =
-                item === 'all' ? !selectedCategory : selectedCategory === item;
-              return (
-                <Pressable
-                  onPress={() =>
-                    setSelectedCategory(item === 'all' ? null : item)
-                  }
-                  className={`mr-2 rounded-full px-3 py-1.5 ${
-                    isSelected ? 'bg-primary' : 'bg-surface-light'
-                  }`}>
-                  <Text
-                    className={`text-sm ${
-                      isSelected ? 'text-white' : 'text-text-secondary'
-                    }`}>
-                    {item === 'all' ? 'All' : item}
-                  </Text>
-                </Pressable>
-              );
-            }}
-          />
-        </View>
-      )}
-
-      <FlatList
-        data={facts}
-        renderItem={renderFact}
-        keyExtractor={item => item.id.toString()}
-        contentContainerStyle={{paddingVertical: 8}}
-        ListEmptyComponent={
-          <View className="items-center pt-20">
-            <Text className="text-4xl">📝</Text>
-            <Text className="mt-3 text-base text-text-muted">
-              {search ? 'No results found' : 'No memories yet'}
-            </Text>
-            <Text className="mt-1 text-sm text-text-muted">
-              Chat with Kuro to save memories
-            </Text>
+      {activeTab === 'Memory' ? (
+        <>
+          <View className="px-3 pt-3">
+            <TextInput
+              className="rounded-xl bg-surface-light px-4 py-2.5 text-base text-text-primary"
+              placeholder="Search memories..."
+              placeholderTextColor="#6c7086"
+              value={search}
+              onChangeText={setSearch}
+            />
           </View>
-        }
-      />
+
+          {!search && (
+            <View className="px-3 pt-3">
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                data={['all', ...categories]}
+                keyExtractor={item => item}
+                renderItem={({item}) => {
+                  const isSelected =
+                    item === 'all' ? !selectedCategory : selectedCategory === item;
+                  return (
+                    <Pressable
+                      onPress={() =>
+                        setSelectedCategory(item === 'all' ? null : item)
+                      }
+                      className={`mr-2 rounded-full px-3 py-1.5 ${
+                        isSelected ? 'bg-primary' : 'bg-surface-light'
+                      }`}>
+                      <Text
+                        className={`text-sm ${
+                          isSelected ? 'text-white' : 'text-text-secondary'
+                        }`}>
+                        {item === 'all' ? 'All' : item}
+                      </Text>
+                    </Pressable>
+                  );
+                }}
+              />
+            </View>
+          )}
+
+          <FlatList
+            data={facts}
+            renderItem={renderFact}
+            keyExtractor={item => item.id.toString()}
+            contentContainerStyle={{paddingVertical: 8}}
+            ListEmptyComponent={
+              <View className="items-center pt-20">
+                <Text className="text-4xl">📝</Text>
+                <Text className="mt-3 text-base text-text-muted">
+                  {search ? 'No results found' : 'No memories yet'}
+                </Text>
+                <Text className="mt-1 text-sm text-text-muted">
+                  Chat with Kuro to save memories
+                </Text>
+              </View>
+            }
+          />
+        </>
+      ) : (
+        <FileList files={files} onDelete={handleDeleteFile} />
+      )}
     </SafeAreaView>
   );
 }
