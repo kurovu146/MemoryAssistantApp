@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, {useEffect, useState} from 'react';
 import {Alert, Pressable, ScrollView, Text, TextInput, View} from 'react-native';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import {
@@ -22,6 +22,8 @@ function ProviderSection({provider}: {provider: (typeof PROVIDERS)[number]}) {
   const [keyInput, setKeyInput] = useState(key);
   const [showKey, setShowKey] = useState(false);
   const [editing, setEditing] = useState(false);
+
+  useEffect(() => { if (!editing) setKeyInput(key); }, [key, editing]);
 
   const providerModels = MODELS.filter(m => m.provider === provider.name);
 
@@ -166,6 +168,8 @@ function EmbeddingsSection() {
   const [keyInput, setKeyInput] = useState(voyageApiKey);
   const [showKey, setShowKey] = useState(false);
   const [editing, setEditing] = useState(false);
+
+  useEffect(() => { if (!editing) setKeyInput(voyageApiKey); }, [voyageApiKey, editing]);
 
   const masked = voyageApiKey
     ? `${voyageApiKey.slice(0, Math.min(8, voyageApiKey.length))}...${voyageApiKey.slice(-4)}`

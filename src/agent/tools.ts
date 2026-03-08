@@ -431,7 +431,9 @@ export async function executeTool(toolName: string, argsJson: string): Promise<T
 
       // Fire-and-forget entity extraction — non-blocking so tool returns immediately
       if (_apiKey && _model) {
-        extractAndLinkEntities(_apiKey, _model, 'document', docId, title + ' ' + content).catch(
+        const capturedKey = _apiKey;
+        const capturedModel = _model;
+        extractAndLinkEntities(capturedKey, capturedModel, 'document', docId, title + ' ' + content).catch(
           () => {},
         );
       }

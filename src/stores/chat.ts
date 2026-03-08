@@ -30,7 +30,6 @@ interface ChatState {
   status: string;
   sendMessage: (
     text: string,
-    apiKey: string,
     model: string,
     images?: ChatImage[],
   ) => Promise<void>;
@@ -98,9 +97,12 @@ async function buildAutoRag(userText: string): Promise<string> {
     Promise.resolve((() => {
       try { return repo.searchFacts(userText); } catch (e) { console.warn('[AutoRAG] FTS memory search failed:', e); return []; }
     })()),
-    // Branch C: Voyage embedding — skipped if no key, graceful fallback on error
+    // Branch C: Voyage embedding — skipped if no key, 3s timeout, graceful fallback
     voyageApiKey
-      ? embedQuery(voyageApiKey, userText).catch((err: unknown) => {
+      ? Promise.race([
+          embedQuery(voyageApiKey, userText),
+          new Promise<null>(resolve => setTimeout(() => resolve(null), 3000)),
+        ]).catch((err: unknown) => {
           console.warn('[AutoRAG] Voyage embedding failed, falling back to FTS:', err);
           return null;
         })
@@ -164,7 +166,7 @@ export const useChat = create<ChatState>((set, get) => ({
     set({sessionId, messages: [], status: ''});
   },
 
-  sendMessage: async (text, _apiKey, model, images) => {
+  sendMessage: async (text, model, images) => {
     const {sessionId} = get();
     if (!sessionId) {
       return;
@@ -181,6 +183,9 @@ export const useChat = create<ChatState>((set, get) => ({
       timestamp: Date.now(),
     };
 
+    // Load history BEFORE appending user message to avoid fragile .slice(0, -1)
+    const historyMessages = repo.loadHistory(sessionId, 6);
+
     set(s => ({
       messages: [...s.messages, userMsg],
       isLoading: true,
@@ -194,8 +199,7 @@ export const useChat = create<ChatState>((set, get) => ({
     const autoRag = await buildAutoRag(text);
     const fullPrompt = buildSystemPrompt(botName) + memoryContext + autoRag;
 
-    const historyMessages = repo.loadHistory(sessionId, 6);
-    const history: Message[] = historyMessages.slice(0, -1).map(h => ({
+    const history: Message[] = historyMessages.map(h => ({
       role: h.role as 'user' | 'assistant',
       content: {type: 'text' as const, text: h.content},
     }));

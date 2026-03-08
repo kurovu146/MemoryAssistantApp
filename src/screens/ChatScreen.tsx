@@ -143,7 +143,7 @@ async function readImageBase64(uri: string): Promise<string> {
 export default function ChatScreen() {
   const {messages, isLoading, status, sendMessage, loadSession} =
     useChat();
-  const {apiKeys, model} = useSettings();
+  const {apiKeys, model, botName} = useSettings();
   const [input, setInput] = useState('');
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
@@ -151,7 +151,7 @@ export default function ChatScreen() {
 
   useEffect(() => {
     loadSession();
-  }, []);
+  }, [loadSession]);
 
   useEffect(() => {
     if (messages.length > 0) {
@@ -171,17 +171,17 @@ export default function ChatScreen() {
       return;
     }
     if (!activeApiKey) {
-      useChat.setState({
+      useChat.setState(s => ({
         messages: [
-          ...messages,
+          ...s.messages,
           {
             id: `err-${Date.now()}`,
-            role: 'assistant',
+            role: 'assistant' as const,
             content: `Please set your ${providerLabel} API key in Settings first.`,
             timestamp: Date.now(),
           },
         ],
-      });
+      }));
       return;
     }
 
@@ -214,7 +214,7 @@ export default function ChatScreen() {
     setInput('');
     setPendingImages([]);
     setPendingFiles([]);
-    sendMessage(fullText, activeApiKey, model, images);
+    sendMessage(fullText, model, images);
   }, [input, canSend, activeApiKey, providerLabel, model, messages, sendMessage, pendingImages, pendingFiles]);
 
   const handleFilePick = useCallback(async () => {
@@ -312,7 +312,7 @@ export default function ChatScreen() {
     <SafeAreaView className="flex-1 bg-surface" edges={['top']}>
       <View className="border-b border-surface-light px-4 py-3">
         <Text className="text-lg font-bold text-text-primary">
-          {useSettings.getState().botName}
+          {botName}
         </Text>
       </View>
 
